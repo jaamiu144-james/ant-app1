@@ -1,0 +1,11 @@
+{
+  "name": "dive-erp",
+  "version": "1.0.0",
+  "description": "Single-file HTML ERP for a dive centre",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "node build.js",
+    "test": "node --test test/"
+  }
+}

@@ -1,0 +1,177 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Ant App — Pricing</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Crect width='24' height='24' rx='5' fill='%230b5d56'/%3E%3Cg fill='none' stroke='%23f5ead9' stroke-width='1.7' stroke-linecap='round' stroke-linejoin='round'%3E%3Ccircle cx='12' cy='6.3' r='1.7'/%3E%3Ccircle cx='12' cy='11.2' r='2.3'/%3E%3Ccircle cx='12' cy='16.8' r='2.7'/%3E%3Cpath d='M12 8v1.1M12 13.3v1.1'/%3E%3Cpath d='M9.7 4.7 7.3 3M14.3 4.7 16.7 3'/%3E%3Cpath d='M4.3 9.3l4.3 1.9M19.7 9.3l-4.3 1.9'/%3E%3Cpath d='M3.4 13l5.2 1M20.6 13l-5.2 1'/%3E%3Cpath d='M4.3 19.5l5.2-3.3M19.7 19.5l-5.2-3.3'/%3E%3C/g%3E%3C/svg%3E">
+<style>
+  :root{ --ink:#16211f; --paper:#f6f4ee; --surface:#fff; --line:#e0dccf; --teal:#0b5d56; --teal-dark:#073e3a; --sand:#b5762b; --muted:#6f6c60; }
+  *{box-sizing:border-box}
+  body{margin:0;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif;background:var(--paper);color:var(--ink);line-height:1.5}
+  header{padding:20px 24px;display:flex;align-items:center;justify-content:space-between;max-width:1040px;margin:0 auto}
+  .brand{display:flex;align-items:center;gap:8px;font-weight:700;font-size:16px}
+  .brand svg{color:var(--teal)}
+  header a{color:var(--teal);text-decoration:none;font-weight:600;font-size:14px}
+  .hero{max-width:640px;margin:36px auto 8px;text-align:center;padding:0 20px}
+  .hero h1{font-size:30px;margin:0 0 10px;letter-spacing:-.01em}
+  .hero p{color:var(--muted);font-size:15.5px;margin:0}
+  .plans{max-width:1040px;margin:36px auto 60px;padding:0 20px;display:grid;grid-template-columns:repeat(3,1fr);gap:18px}
+  @media (max-width:820px){ .plans{grid-template-columns:1fr} }
+  .plan{background:var(--surface);border:1px solid var(--line);border-radius:14px;padding:26px 22px;display:flex;flex-direction:column;position:relative}
+  .plan.featured{border-color:var(--teal);box-shadow:0 8px 24px rgba(11,93,86,.12)}
+  .badge{position:absolute;top:-11px;left:22px;background:var(--sand);color:#fff;font-size:11px;font-weight:700;padding:3px 10px;border-radius:999px;letter-spacing:.03em}
+  .plan h2{font-size:17px;margin:6px 0 4px}
+  .plan .desc{color:var(--muted);font-size:13.5px;margin-bottom:14px;min-height:36px}
+  .price{font-size:32px;font-weight:700;letter-spacing:-.01em}
+  .price small{font-size:14px;font-weight:600;color:var(--muted)}
+  .plan ul{list-style:none;margin:16px 0 20px;padding:0;font-size:13.5px;flex:1}
+  .plan li{padding:6px 0;display:flex;gap:8px;align-items:flex-start}
+  .plan li svg{flex:0 0 auto;color:var(--teal);margin-top:2px}
+  .btn{display:block;text-align:center;padding:11px;border-radius:9px;background:var(--teal-dark);color:#fff;font-weight:700;font-size:14px;text-decoration:none;border:none;cursor:pointer;width:100%}
+  .btn:hover{background:var(--teal)}
+  .plan.featured .btn{background:var(--sand)}
+  .plan.featured .btn:hover{filter:brightness(1.05)}
+  .signup-modal-backdrop{position:fixed;inset:0;background:rgba(7,20,18,.5);display:none;align-items:center;justify-content:center;padding:20px;z-index:50}
+  .signup-modal-backdrop.open{display:flex}
+  .signup-modal{background:#fff;border-radius:14px;padding:26px 24px;max-width:380px;width:100%}
+  .signup-modal h3{margin:0 0 4px}
+  .signup-modal p.sub{color:var(--muted);font-size:13px;margin:0 0 16px}
+  .field{margin-bottom:12px}
+  .field label{display:block;font-size:12.5px;font-weight:600;margin-bottom:4px}
+  .field input{width:100%;padding:9px 10px;border:1px solid var(--line);border-radius:8px;font-size:14px}
+  .err{color:#a3352c;font-size:12.5px;margin:6px 0 0;display:none}
+  .foot-note{max-width:640px;margin:0 auto 60px;text-align:center;color:var(--muted);font-size:12.5px;padding:0 20px}
+  .close-x{position:absolute;top:12px;right:14px;background:none;border:none;font-size:20px;cursor:pointer;color:var(--muted)}
+</style>
+</head>
+<body>
+<header>
+  <div class="brand">
+    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="6" r="2"/><circle cx="12" cy="11" r="2.6"/><circle cx="12" cy="17" r="3"/><path d="M12 8v1"/><path d="M12 13.5v1"/><path d="M9.5 4.5 7 2.5M14.5 4.5 17 2.5"/><path d="M4 9l4.5 2M20 9l-4.5 2"/><path d="M3 13l5.5 1M21 13l-5.5 1"/><path d="M4 20l5.5-3.5M20 20l-5.5-3.5"/></svg>
+    Ant App
+  </div>
+  <a href="/login">Log in</a>
+</header>
+
+<div class="hero">
+  <h1>Booking, sales and bookkeeping for dive &amp; excursion centres</h1>
+  <p>Pick the parts you need. Upgrade any time.</p>
+</div>
+
+<div class="plans" id="plans">
+  <div class="plan" data-plan="front">
+    <h2>Front Office</h2>
+    <div class="desc">Calendar, bookings, guests &amp; agents, kiosk waivers, taking payment at the counter.</div>
+    <div class="price">$39<small>/mo</small></div>
+    <ul>
+      <li>✓ Calendar &amp; bookings</li>
+      <li>✓ Sales invoices &amp; trip manifest</li>
+      <li>✓ Waiver kiosk</li>
+      <li>✓ Customers, guests &amp; agents</li>
+      <li>✓ Packages, price lists, equipment &amp; fleet</li>
+      <li>✓ Point-of-sale receipts</li>
+    </ul>
+    <button class="btn" data-choose="front">Start Front Office</button>
+  </div>
+
+  <div class="plan featured" data-plan="complete">
+    <div class="badge">Best value</div>
+    <h2>Complete</h2>
+    <div class="desc">Everything — front desk through financials, in one place.</div>
+    <div class="price">$69<small>/mo</small></div>
+    <ul>
+      <li>✓ Everything in Front Office</li>
+      <li>✓ Everything in Back Office</li>
+      <li>✓ One login, one subscription</li>
+    </ul>
+    <button class="btn" data-choose="complete">Start Complete</button>
+  </div>
+
+  <div class="plan" data-plan="back">
+    <h2>Back Office</h2>
+    <div class="desc">Bookkeeping &amp; finance — bills, payroll, ledgers, tax, financial reports.</div>
+    <div class="price">$49<small>/mo</small></div>
+    <ul>
+      <li>✓ Chart of accounts &amp; journal</li>
+      <li>✓ Ledgers &amp; financial reports</li>
+      <li>✓ Bills &amp; vendor management</li>
+      <li>✓ Payroll</li>
+      <li>✓ Day-end close, deposits, reconciliation</li>
+      <li>✓ Tax reporting</li>
+    </ul>
+    <button class="btn" data-choose="back">Start Back Office</button>
+  </div>
+</div>
+
+<p class="foot-note">All plans run one dive centre / location. Already subscribed? <a href="/login">Log in</a>.</p>
+
+<div class="signup-modal-backdrop" id="modal">
+  <div class="signup-modal" style="position:relative">
+    <button class="close-x" id="modal-close">&times;</button>
+    <h3 id="modal-title">Start your subscription</h3>
+    <p class="sub" id="modal-sub"></p>
+    <form id="signup-form">
+      <div class="field"><label>Dive centre / company name</label><input id="f-company" required></div>
+      <div class="field"><label>Your email</label><input id="f-email" type="email" required></div>
+      <div class="field"><label>Password</label><input id="f-password" type="password" minlength="8" required></div>
+      <p class="err" id="f-err"></p>
+      <button class="btn" type="submit" id="f-submit">Continue to payment</button>
+    </form>
+  </div>
+</div>
+
+<script>
+  const PLAN_NAMES = { front:'Front Office', back:'Back Office', complete:'Complete' };
+  const modal = document.getElementById('modal');
+  let chosenPlan = null;
+
+  document.querySelectorAll('[data-choose]').forEach(btn=>{
+    btn.addEventListener('click', ()=>{
+      chosenPlan = btn.dataset.choose;
+      document.getElementById('modal-title').textContent = 'Start ' + PLAN_NAMES[chosenPlan];
+      document.getElementById('modal-sub').textContent = "You'll set up your account, then go to secure payment.";
+      document.getElementById('f-err').style.display = 'none';
+      modal.classList.add('open');
+    });
+  });
+  document.getElementById('modal-close').addEventListener('click', ()=> modal.classList.remove('open'));
+  modal.addEventListener('mousedown', e=>{ if(e.target===modal) modal.classList.remove('open'); });
+
+  document.getElementById('signup-form').addEventListener('submit', async (e)=>{
+    e.preventDefault();
+    const errEl = document.getElementById('f-err');
+    const submitBtn = document.getElementById('f-submit');
+    errEl.style.display = 'none';
+    submitBtn.disabled = true; submitBtn.textContent = 'Please wait…';
+    try{
+      const res = await fetch('/api/signup', {
+        method: 'POST',
+        credentials: 'include',
+        headers: { 'Content-Type':'application/json' },
+        body: JSON.stringify({
+          companyName: document.getElementById('f-company').value.trim(),
+          email: document.getElementById('f-email').value.trim(),
+          password: document.getElementById('f-password').value,
+          plan: chosenPlan,
+        }),
+      });
+      const json = await res.json();
+      if(!res.ok){ throw new Error(json.error || 'Something went wrong.'); }
+      if(json.checkoutUrl){ location.href = json.checkoutUrl; }
+      else { location.href = '/app'; } // dev mode — no Stripe configured, account activated immediately
+    }catch(err){
+      errEl.textContent = err.message;
+      errEl.style.display = 'block';
+      submitBtn.disabled = false; submitBtn.textContent = 'Continue to payment';
+    }
+  });
+
+  // Resuming an interrupted checkout (?resume=1 sent here by /app when a
+  // signed-in tenant's subscription isn't active yet).
+  if(new URLSearchParams(location.search).get('resume')){
+    document.querySelector('.hero p').textContent = "Pick a plan to finish setting up your account.";
+  }
+</script>
+</body>
+</html>

@@ -1,0 +1,13 @@
+{
+  "name": "ant-app-server",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Multi-tenant cloud host for Ant App (dive centre booking + finance) — auth, Stripe subscriptions, and per-tenant data storage. Zero external dependencies: built on Node 22's built-ins (node:sqlite, crypto, fetch, http).",
+  "engines": { "node": ">=22.5.0" },
+  "scripts": {
+    "start": "node src/index.js",
+    "dev": "node src/index.js"
+  },
+  "dependencies": {}
+}
