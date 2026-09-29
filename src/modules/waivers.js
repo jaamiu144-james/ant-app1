@@ -1,7 +1,9 @@
 /* ---------------------------------------------------------------------
    waivers.js — user-definable waiver templates, and a lightweight kiosk
-   screen for guests to search themselves up, read the waiver, consent
-   and sign on a tablet at reception.
+   screen for guests to search themselves up, give their general and
+   contact details, read the waiver, consent and sign on a tablet at
+   reception. A signed waiver can be reprinted as a PDF (via the browser's
+   own print-to-PDF, same zero-dependency approach as invoices).
 
    Kiosk auth note: this app's auth is already explicitly "not secure" —
    just accountability separation for staff (see auth.js). The kiosk route
@@ -80,6 +82,89 @@
   // Plain-text waiver body -> simple HTML: blank line = new paragraph.
   function waiverBodyHtml(body){
     return (body||'').split(/\n\s*\n/).map(p=>`<p style="margin-bottom:10px">${esc(p).replace(/\n/g,'<br>')}</p>`).join('');
+  }
+
+  // Best-effort split of an existing single "full name" field into parts,
+  // just to pre-fill the first/middle/last boxes on a guest who was quick-
+  // added at the kiosk (name only) or created before this form existed.
+  // The guest can always correct it before continuing.
+  function splitName(name){
+    const parts = (name||'').trim().split(/\s+/).filter(Boolean);
+    if(parts.length===0) return { first:'', middle:'', last:'' };
+    if(parts.length===1) return { first:parts[0], middle:'', last:'' };
+    return { first:parts[0], middle:parts.slice(1,-1).join(' '), last:parts[parts.length-1] };
+  }
+
+  function isMinor(dob){
+    if(!dob) return false;
+    const b = new Date(dob+'T00:00:00');
+    if(isNaN(b)) return false;
+    const now = new Date();
+    let age = now.getFullYear() - b.getFullYear();
+    const notYetBirthday = (now.getMonth() < b.getMonth()) || (now.getMonth()===b.getMonth() && now.getDate() < b.getDate());
+    if(notYetBirthday) age--;
+    return age < 18;
+  }
+
+  // Opens a clean, print-only document (its own window/tab) with the
+  // guest's general/contact info, the waiver text and their signature —
+  // "Generate PDF" here just means using the browser's own print dialog
+  // ("Save as PDF"), same zero-dependency approach the invoice Print
+  // button uses, but as a standalone page since the kiosk has no sidebar
+  // shell to hide behind @media print rules.
+  function openWaiverPrint(guest){
+    if(!guest || !guest.waiverSigned){ toast('This guest has no signed waiver on file yet.', 'err'); return; }
+    const tpl = guest.waiverTemplateId ? Store.find('waiverTemplates', guest.waiverTemplateId) : null;
+    const win = window.open('', '_blank');
+    if(!win){ toast('Your browser blocked the new tab — allow pop-ups to view/print the waiver.', 'err'); return; }
+    const company = esc(Store.settings.companyName||'Dive Squad');
+    win.document.write(`<!doctype html>
+<html><head><meta charset="utf-8"><title>Waiver — ${esc(guest.name)}</title>
+<style>
+  body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif;color:#16211f;max-width:720px;margin:32px auto;padding:0 20px}
+  h1{font-size:19px;margin:0 0 2px}
+  .sub{color:#6f6c60;font-size:12.5px;margin:0 0 22px}
+  h2{font-size:13px;text-transform:uppercase;letter-spacing:.04em;color:#6f6c60;margin:22px 0 8px;border-bottom:1px solid #e0dccf;padding-bottom:4px}
+  dl{display:grid;grid-template-columns:170px 1fr;gap:6px 12px;margin:0}
+  dt{color:#6f6c60;font-size:12.5px}
+  dd{margin:0;font-size:13.5px}
+  .waiver-text{font-size:12.5px;line-height:1.5;border:1px solid #e0dccf;border-radius:8px;padding:14px;margin-top:8px}
+  .sig-box{margin-top:10px}
+  .sig-box img{max-width:280px;border:1px solid #e0dccf;border-radius:8px;background:#fff;display:block}
+  .print-btn{margin:18px 0;padding:9px 16px;border-radius:8px;border:none;background:#073e3a;color:#fff;font-weight:700;cursor:pointer}
+  @media print{ .print-btn{display:none} }
+</style></head>
+<body>
+  <button class="print-btn" onclick="window.print()">Print / Save as PDF</button>
+  <h1>${company}</h1>
+  <p class="sub">Signed liability waiver${tpl?` — ${esc(tpl.name)}`:''}</p>
+
+  <h2>General information</h2>
+  <dl>
+    <dt>Full name</dt><dd>${esc(guest.name||'—')}</dd>
+    <dt>Passport / ID number</dt><dd>${esc(guest.passportNo||'—')}</dd>
+    <dt>Nationality</dt><dd>${esc(guest.nationality||'—')}</dd>
+    <dt>Date of birth</dt><dd>${guest.dob?fmtDate(guest.dob):'—'}</dd>
+    ${guest.isMinor?`<dt>Parent / guardian</dt><dd>${esc(guest.guardianName||'—')}</dd>`:''}
+  </dl>
+
+  <h2>Contact information</h2>
+  <dl>
+    <dt>Email</dt><dd>${esc(guest.email||'—')}</dd>
+    <dt>Contact number</dt><dd>${esc(guest.phone||'—')}</dd>
+  </dl>
+
+  <h2>Waiver</h2>
+  <div class="waiver-text">${tpl?waiverBodyHtml(tpl.body):'<p><em>Original waiver template no longer available.</em></p>'}</div>
+  <p style="font-size:12.5px;margin-top:10px">I have read and agree to the terms above.</p>
+
+  <h2>Signature</h2>
+  <div class="sig-box">
+    ${guest.waiverSignatureDataUrl?`<img src="${guest.waiverSignatureDataUrl}">`:'<p>—</p>'}
+    <p style="font-size:12px;color:#6f6c60;margin-top:6px">Signed ${guest.waiverSignedAt?fmtDateTime(guest.waiverSignedAt):(guest.waiverDate?fmtDate(guest.waiverDate):'—')}</p>
+  </div>
+</body></html>`);
+    win.document.close();
   }
 
   /* ---------------- KIOSK ---------------- */
@@ -190,8 +275,92 @@
     draw();
   }
 
-  // Step 2: show the waiver, consent + signature pad, save to the guest record.
+  // Step 2: general guest information + contact information, required
+  // before the waiver itself. Pre-filled from whatever's already on the
+  // guest record (a front-desk quick-add only has a name), and written
+  // back onto it so the profile stays current everywhere else in the app.
   function kioskStep2(guestId){
+    const guest = Store.find('guests', guestId);
+    const body = qs('#kiosk-body');
+    if(!guest){
+      body.innerHTML = `<div class="danger-box">Guest not found.</div><button class="btn mt-12" id="kiosk-back">&larr; Back</button>`;
+      qs('#kiosk-back').addEventListener('click', kioskStep1);
+      return;
+    }
+    const guess = splitName(guest.name);
+
+    function draw(){
+      body.innerHTML = `
+        <button class="btn btn-sm mb-12" id="kiosk-back">&larr; Not you?</button>
+        <h1 style="font-size:20px;margin-bottom:4px">Your details</h1>
+        <p class="muted small mb-16">Please check/fill in your details before the waiver.</p>
+
+        <div class="section-title">General information</div>
+        <div class="form-row">
+          <div class="field"><label>First name *</label><input id="kg-first" type="text" value="${esc(guest.firstName!=null?guest.firstName:guess.first)}"></div>
+          <div class="field"><label>Middle name</label><input id="kg-middle" type="text" value="${esc(guest.middleName!=null?guest.middleName:guess.middle)}"></div>
+        </div>
+        <div class="field"><label>Last name *</label><input id="kg-last" type="text" value="${esc(guest.lastName!=null?guest.lastName:guess.last)}"></div>
+        <div class="form-row">
+          <div class="field"><label>Passport / ID number *</label><input id="kg-pass" type="text" value="${esc(guest.passportNo||'')}"></div>
+          <div class="field"><label>Nationality *</label><input id="kg-nat" type="text" value="${esc(guest.nationality||'')}"></div>
+        </div>
+        <div class="field"><label>Date of birth *</label><input id="kg-dob" type="date" value="${guest.dob||''}"></div>
+
+        <div class="section-title">Contact information</div>
+        <div class="form-row">
+          <div class="field"><label>Email *</label><input id="kg-email" type="email" value="${esc(guest.email||'')}"></div>
+          <div class="field"><label>Contact number *</label><input id="kg-phone" type="text" value="${esc(guest.phone||'')}"></div>
+        </div>
+
+        <div class="field" id="kg-guardian-wrap" style="display:none">
+          <label>Parent / guardian name *</label><input id="kg-guardian" type="text" value="${esc(guest.guardianName||'')}">
+          <div class="small muted mt-4">Required for guests under 18.</div>
+        </div>
+
+        <button class="btn btn-primary btn-block mt-12" id="kg-next">Continue to waiver &rarr;</button>
+      `;
+      qs('#kiosk-back').addEventListener('click', kioskStep1);
+
+      const guardianWrap = qs('#kg-guardian-wrap');
+      function refreshGuardianVisibility(){ guardianWrap.style.display = isMinor(qs('#kg-dob').value) ? '' : 'none'; }
+      qs('#kg-dob').addEventListener('change', refreshGuardianVisibility);
+      refreshGuardianVisibility();
+
+      qs('#kg-next').addEventListener('click', ()=>{
+        const first = qs('#kg-first').value.trim();
+        const middle = qs('#kg-middle').value.trim();
+        const last = qs('#kg-last').value.trim();
+        const passportNo = qs('#kg-pass').value.trim();
+        const nationality = qs('#kg-nat').value.trim();
+        const dob = qs('#kg-dob').value;
+        const email = qs('#kg-email').value.trim();
+        const phone = qs('#kg-phone').value.trim();
+        const guardianName = qs('#kg-guardian').value.trim();
+        const minor = isMinor(dob);
+
+        if(!first || !last){ toast('First and last name are required.', 'err'); return; }
+        if(!passportNo){ toast('Passport / ID number is required.', 'err'); return; }
+        if(!nationality){ toast('Nationality is required.', 'err'); return; }
+        if(!dob){ toast('Date of birth is required.', 'err'); return; }
+        if(!email || !phone){ toast('Both an email and a contact number are required.', 'err'); return; }
+        if(minor && !guardianName){ toast('A parent or guardian name is required for guests under 18.', 'err'); return; }
+
+        Store.update('guests', guest.id, {
+          firstName: first, middleName: middle, lastName: last,
+          name: [first, middle, last].filter(Boolean).join(' '),
+          passportNo, nationality, dob, email, phone,
+          guardianName: minor ? guardianName : (guardianName || guest.guardianName || ''),
+          isMinor: minor
+        });
+        kioskStep3(guest.id);
+      });
+    }
+    draw();
+  }
+
+  // Step 3: show the waiver, consent + signature pad, save to the guest record.
+  function kioskStep3(guestId){
     const guest = Store.find('guests', guestId);
     const body = qs('#kiosk-body');
     const templates = activeTemplates();
@@ -218,7 +387,7 @@
         <button class="btn btn-primary btn-block mt-12" id="kiosk-save">Sign &amp; save waiver</button>
       `;
       if(templates.length>1) qs('#kiosk-tpl').addEventListener('change', e=>{ templateId = e.target.value; draw(); });
-      qs('#kiosk-back').addEventListener('click', kioskStep1);
+      qs('#kiosk-back').addEventListener('click', ()=>kioskStep2(guest.id));
 
       const canvas = qs('#kiosk-sig');
       const ctx = canvas.getContext('2d');
@@ -248,12 +417,14 @@
         if(!qs('#kiosk-consent').checked){ toast('Please check the consent box.', 'err'); return; }
         if(!hasInk){ toast('Please sign in the box.', 'err'); return; }
         const dataUrl = canvas.toDataURL('image/png');
-        Store.update('guests', guest.id, {
+        const saved = Store.update('guests', guest.id, {
           waiverSigned: true, waiverDate: todayISO(), waiverSignedAt: nowISO(),
           waiverTemplateId: templateId, waiverTemplateName: tpl.name, waiverSignatureDataUrl: dataUrl
         });
         body.innerHTML = `<div class="empty-state card"><h3>Waiver signed — thank you, ${esc(guest.name)}!</h3><p>You can hand the tablet back to reception now.</p>
+          <button class="btn mt-12" id="kiosk-pdf">Download / print waiver (PDF)</button>
           <button class="btn btn-primary mt-12" id="kiosk-next">Next guest</button></div>`;
+        qs('#kiosk-pdf').addEventListener('click', ()=>openWaiverPrint(saved));
         qs('#kiosk-next').addEventListener('click', kioskStep1);
       });
     }
@@ -262,5 +433,5 @@
 
   Router.on('/waivers', renderTemplates);
   Router.on('/kiosk', renderKiosk);
-  window.WaiversModule = { defaultTemplate, waiverBodyHtml };
+  window.WaiversModule = { defaultTemplate, waiverBodyHtml, openWaiverPrint };
 })();

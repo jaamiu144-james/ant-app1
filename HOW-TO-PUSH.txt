@@ -1,0 +1,39 @@
+HOW TO PUSH THIS TO GITHUB
+===========================
+
+1. Create an empty repository on GitHub:
+   - Go to github.com/new
+   - Give it a name (e.g. "ant-app")
+   - Do NOT check "Add a README file"
+   - Click "Create repository"
+   - Copy the repository URL it shows you (looks like
+     https://github.com/yourname/ant-app.git)
+
+2. Get a Personal Access Token (this is what you'll use as your
+   "password" when Git asks you to sign in):
+   - Go to github.com/settings/tokens?type=beta
+   - Click "Generate new token"
+   - Under Repository access, choose "Only select repositories" and
+     pick the repo you just created
+   - Under Permissions, set "Contents" to "Read and write"
+   - Click Generate, then copy the token (starts with github_pat_)
+
+3. Run the script:
+   - Windows: double-click push-to-github.bat
+   - Mac/Linux: open Terminal in this folder and run:
+       chmod +x push-to-github.sh
+       ./push-to-github.sh
+
+4. When asked, paste the repository URL from step 1.
+
+5. If a window pops up asking you to sign in to GitHub, or the
+   terminal asks for a username and password:
+   - Username: your GitHub username
+   - Password: paste the token from step 2 (NOT your GitHub password)
+
+That's it - your code will be on GitHub. If it asks for the same thing
+again on a future run, it means the token expired or was revoked;
+generate a new one and try again.
+
+Once you're done, you can revoke the token from
+github.com/settings/tokens?type=beta if you don't need it anymore.

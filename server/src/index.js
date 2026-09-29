@@ -79,13 +79,13 @@ async function handleSignup(req, res){
   if(!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return sendJson(res, 400, { error: 'A valid email is required.' });
   if(password.length < 8) return sendJson(res, 400, { error: 'Password must be at least 8 characters.' });
   if(!plan) return sendJson(res, 400, { error: 'Choose a plan: front, back, or complete.' });
-  if(db.getUserByEmail(email)) return sendJson(res, 409, { error: 'An account with that email already exists — try logging in instead.' });
+  if(await db.getUserByEmail(email)) return sendJson(res, 409, { error: 'An account with that email already exists — try logging in instead.' });
 
   const edition = PLAN_TO_EDITION[plan];
   const tenantId = db.uid('tenant');
-  db.createTenant({ id: tenantId, companyName, edition, plan });
+  await db.createTenant({ id: tenantId, companyName, edition, plan });
   const userId = db.uid('user');
-  db.createUser({ id: userId, tenantId, email, passwordHash: auth.hashPassword(password), name: body.name || null });
+  await db.createUser({ id: userId, tenantId, email, passwordHash: auth.hashPassword(password), name: body.name || null });
 
   let checkoutUrl = null;
   if(billing.isConfigured()){
@@ -94,7 +94,7 @@ async function handleSignup(req, res){
       return sendJson(res, 500, { error: `Billing is configured but no Stripe price is set for the "${plan}" plan (see server/SETUP.md).` });
     }
     const customer = await billing.createCustomer({ email, name: companyName });
-    db.updateTenant(tenantId, { stripe_customer_id: customer.id });
+    await db.updateTenant(tenantId, { stripe_customer_id: customer.id });
     const session = await billing.createCheckoutSession({
       customerId: customer.id,
       priceId,
@@ -106,7 +106,7 @@ async function handleSignup(req, res){
   } else {
     // Dev mode — no Stripe configured. Activate immediately so the app
     // can be built/tested end-to-end. NOT for production use.
-    db.updateTenant(tenantId, { status: 'active' });
+    await db.updateTenant(tenantId, { status: 'active' });
   }
 
   const token = auth.createSessionToken({ userId, tenantId });
@@ -119,7 +119,7 @@ async function handleLogin(req, res){
   try{ body = await readJson(req); }catch(e){ return sendJson(res, 400, { error: e.message }); }
   const email = String(body.email||'').trim().toLowerCase();
   const password = String(body.password||'');
-  const user = db.getUserByEmail(email);
+  const user = await db.getUserByEmail(email);
   if(!user || !auth.verifyPassword(password, user.password_hash)){
     return sendJson(res, 401, { error: 'Incorrect email or password.' });
   }
@@ -133,39 +133,39 @@ function handleLogout(req, res){
   sendJson(res, 200, { ok: true });
 }
 
-function handleSession(req, res){
+async function handleSession(req, res){
   const s = getSession(req);
   if(!s) return sendJson(res, 200, { authenticated: false });
-  const tenant = db.getTenant(s.tid);
+  const tenant = await db.getTenant(s.tid);
   if(!tenant) return sendJson(res, 200, { authenticated: false });
   sendJson(res, 200, { authenticated: true, tenant: tenantPublicView(tenant) });
 }
 
-function handleGetData(req, res){
+async function handleGetData(req, res){
   const s = getSession(req);
   if(!s) return sendJson(res, 401, { error: 'Not signed in.' });
-  const tenant = db.getTenant(s.tid);
+  const tenant = await db.getTenant(s.tid);
   if(!tenant) return sendJson(res, 401, { error: 'Account not found.' });
-  const data = db.getTenantData(s.tid);
+  const data = await db.getTenantData(s.tid);
   sendJson(res, 200, { data, tenant: tenantPublicView(tenant) });
 }
 
 async function handlePutData(req, res){
   const s = getSession(req);
   if(!s) return sendJson(res, 401, { error: 'Not signed in.' });
-  const tenant = db.getTenant(s.tid);
+  const tenant = await db.getTenant(s.tid);
   if(!tenant) return sendJson(res, 401, { error: 'Account not found.' });
   let body;
   try{ body = await readJson(req, { limit: 20_000_000 }); }catch(e){ return sendJson(res, 400, { error: e.message }); }
   if(!body || typeof body.data !== 'object') return sendJson(res, 400, { error: 'Missing data.' });
-  db.saveTenantData(s.tid, body.data);
+  await db.saveTenantData(s.tid, body.data);
   sendJson(res, 200, { ok: true });
 }
 
 async function handleBillingPortal(req, res){
   const s = getSession(req);
   if(!s) return sendJson(res, 401, { error: 'Not signed in.' });
-  const tenant = db.getTenant(s.tid);
+  const tenant = await db.getTenant(s.tid);
   if(!tenant || !tenant.stripe_customer_id) return sendJson(res, 400, { error: 'No billing account on file yet.' });
   try{
     const portal = await billing.createBillingPortalSession({ customerId: tenant.stripe_customer_id, returnUrl: `${APP_URL}/app` });
@@ -191,24 +191,24 @@ async function handleStripeWebhook(req, res){
         const session = event.data.object;
         const tenantId = session.metadata && session.metadata.tenant_id;
         if(tenantId){
-          db.updateTenant(tenantId, { status: 'active', stripe_subscription_id: session.subscription || null });
+          await db.updateTenant(tenantId, { status: 'active', stripe_subscription_id: session.subscription || null });
         }
         break;
       }
       case 'customer.subscription.updated': {
         const sub = event.data.object;
-        const tenant = db.getTenantByStripeSubscription(sub.id) || db.getTenantByStripeCustomer(sub.customer);
+        const tenant = (await db.getTenantByStripeSubscription(sub.id)) || (await db.getTenantByStripeCustomer(sub.customer));
         if(tenant){
           const status = sub.status === 'active' || sub.status === 'trialing' ? 'active'
             : sub.status === 'past_due' ? 'past_due' : 'canceled';
-          db.updateTenant(tenant.id, { status, stripe_subscription_id: sub.id });
+          await db.updateTenant(tenant.id, { status, stripe_subscription_id: sub.id });
         }
         break;
       }
       case 'customer.subscription.deleted': {
         const sub = event.data.object;
-        const tenant = db.getTenantByStripeSubscription(sub.id) || db.getTenantByStripeCustomer(sub.customer);
-        if(tenant) db.updateTenant(tenant.id, { status: 'canceled' });
+        const tenant = (await db.getTenantByStripeSubscription(sub.id)) || (await db.getTenantByStripeCustomer(sub.customer));
+        if(tenant) await db.updateTenant(tenant.id, { status: 'canceled' });
         break;
       }
       default:
@@ -221,10 +221,10 @@ async function handleStripeWebhook(req, res){
   sendJson(res, 200, { received: true });
 }
 
-function serveApp(req, res){
+async function serveApp(req, res){
   const s = getSession(req);
   if(!s) return redirect(res, '/login');
-  const tenant = db.getTenant(s.tid);
+  const tenant = await db.getTenant(s.tid);
   if(!tenant) return redirect(res, '/login');
   if(tenant.status !== 'active'){
     return redirect(res, '/pricing?resume=1');
@@ -232,14 +232,23 @@ function serveApp(req, res){
   sendHtml(res, 200, renderAppHtml({ edition: tenant.edition }));
 }
 
-function serveStatic(res, filePath, contentType){
+function serveStatic(res, filePath, contentType, { cache } = {}){
   try{
     const body = fs.readFileSync(filePath);
-    res.writeHead(200, { 'Content-Type': contentType, 'Content-Length': body.length });
+    const headers = { 'Content-Type': contentType, 'Content-Length': body.length };
+    if(cache) headers['Cache-Control'] = cache;
+    res.writeHead(200, headers);
     res.end(body);
   }catch{
     sendHtml(res, 404, '<h1>Not found</h1>');
   }
+}
+
+// /icons/<name>.png — basename-only, no path traversal (rejects anything
+// with a slash or that isn't a plain filename already on disk).
+function serveIcon(res, name){
+  if(!/^[a-z0-9.-]+\.png$/i.test(name)) return sendHtml(res, 404, '<h1>Not found</h1>');
+  serveStatic(res, path.join(PUBLIC_DIR, 'icons', name), 'image/png', { cache: 'public, max-age=604800' });
 }
 
 /* ---- router ---- */
@@ -250,13 +259,20 @@ const server = http.createServer(async (req, res)=>{
     if(pathname === '/' ) return redirect(res, getSession(req) ? '/app' : '/pricing');
     if(pathname === '/pricing' && req.method === 'GET') return serveStatic(res, path.join(PUBLIC_DIR, 'pricing.html'), 'text/html; charset=utf-8');
     if(pathname === '/login' && req.method === 'GET') return serveStatic(res, path.join(PUBLIC_DIR, 'login.html'), 'text/html; charset=utf-8');
-    if(pathname === '/app' && req.method === 'GET') return serveApp(req, res);
+    if(pathname === '/app' && req.method === 'GET') return await serveApp(req, res);
+
+    // PWA — manifest, service worker, offline fallback, icons.
+    if(pathname === '/manifest.webmanifest' && req.method === 'GET') return serveStatic(res, path.join(PUBLIC_DIR, 'manifest.webmanifest'), 'application/manifest+json; charset=utf-8', { cache: 'public, max-age=3600' });
+    if(pathname === '/sw.js' && req.method === 'GET') return serveStatic(res, path.join(PUBLIC_DIR, 'sw.js'), 'text/javascript; charset=utf-8', { cache: 'no-cache' });
+    if(pathname === '/offline.html' && req.method === 'GET') return serveStatic(res, path.join(PUBLIC_DIR, 'offline.html'), 'text/html; charset=utf-8');
+    if(pathname === '/pwa-install.js' && req.method === 'GET') return serveStatic(res, path.join(PUBLIC_DIR, 'pwa-install.js'), 'text/javascript; charset=utf-8', { cache: 'public, max-age=3600' });
+    if(pathname.startsWith('/icons/') && req.method === 'GET') return serveIcon(res, pathname.slice('/icons/'.length));
 
     if(pathname === '/api/signup' && req.method === 'POST') return await handleSignup(req, res);
     if(pathname === '/api/login' && req.method === 'POST') return await handleLogin(req, res);
     if(pathname === '/api/logout' && req.method === 'POST') return handleLogout(req, res);
-    if(pathname === '/api/session' && req.method === 'GET') return handleSession(req, res);
-    if(pathname === '/api/data' && req.method === 'GET') return handleGetData(req, res);
+    if(pathname === '/api/session' && req.method === 'GET') return await handleSession(req, res);
+    if(pathname === '/api/data' && req.method === 'GET') return await handleGetData(req, res);
     if(pathname === '/api/data' && req.method === 'PUT') return await handlePutData(req, res);
     if(pathname === '/api/billing/portal' && req.method === 'GET') return await handleBillingPortal(req, res);
     if(pathname === '/api/stripe/webhook' && req.method === 'POST') return await handleStripeWebhook(req, res);
@@ -268,7 +284,14 @@ const server = http.createServer(async (req, res)=>{
   }
 });
 
-server.listen(PORT, ()=>{
-  console.log(`Ant App server listening on http://localhost:${PORT}`);
-  console.log(`Billing: ${billing.isConfigured() ? 'Stripe configured' : 'DEV MODE — Stripe not configured, signups activate immediately with no payment'}`);
-});
+db.migrate()
+  .then(()=>{
+    server.listen(PORT, ()=>{
+      console.log(`Ant App server listening on http://localhost:${PORT}`);
+      console.log(`Billing: ${billing.isConfigured() ? 'Stripe configured' : 'DEV MODE — Stripe not configured, signups activate immediately with no payment'}`);
+    });
+  })
+  .catch(err=>{
+    console.error('Could not reach/migrate the MySQL database — check MYSQL_URL / MYSQL_HOST etc. in .env:', err.message);
+    process.exit(1);
+  });

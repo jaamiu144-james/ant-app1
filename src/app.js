@@ -199,6 +199,7 @@ function renderTopbarRight(){
       ${users.map(u=>`<option value="${u.id}" ${cur&&cur.id===u.id?'selected':''}>${esc(u.name)} — ${Auth.ROLE_LABEL[u.role]}</option>`).join('')}
     </select>
     ${cur?`<span class="role-badge">${esc(Auth.roleLabel(cur.role))}${Auth.isViewOnly()?' · view only':''}</span>`:''}
+    ${window.CLOUD_MODE?`<button class="btn btn-sm" id="pwa-install-btn">Install app</button>`:''}
     ${window.CLOUD_MODE?`<button class="btn btn-sm" id="cloud-logout" title="Sign out of ${esc(Store.settings.companyName||'your')} account">Log out</button>`:''}
   `;
   const sel = qs('#user-switch', right);

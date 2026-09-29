@@ -1,108 +1,135 @@
 /* ---------------------------------------------------------------------
-   db.js — storage layer, built on Node's built-in node:sqlite (Node 22+,
-   no external DB driver needed). One file on disk (DB_PATH), three
+   db.js — storage layer, on MySQL (via the `mysql2` driver). Three
    tables: tenants (one per dive centre / subscription), users (platform
    login — separate from the in-app "Store" users each tenant manages on
    the Settings > Users tab), and tenant_data (the tenant's whole app
    data blob, the same JSON that used to live in localStorage).
 
-   SQLite is a completely reasonable production choice at this scale —
-   one writer per tenant, no cross-tenant joins, easy to back up (it's a
-   single file). If/when this needs to scale past what one file can hold,
-   swap this module for a Postgres-backed one; nothing outside db.js
-   needs to change since every caller only sees the functions below.
+   Connection: set either MYSQL_URL (mysql://user:pass@host:port/dbname
+   — what most managed MySQL hosts hand you) or the discrete MYSQL_HOST /
+   MYSQL_PORT / MYSQL_USER / MYSQL_PASSWORD / MYSQL_DATABASE vars. See
+   server/SETUP.md.
+
+   Every exported function here is async (mysql2 is promise-based) —
+   callers in index.js all `await` them.
 --------------------------------------------------------------------- */
-import { DatabaseSync } from 'node:sqlite';
-import fs from 'node:fs';
-import path from 'node:path';
+import mysql from 'mysql2/promise';
 import crypto from 'node:crypto';
 
-const DB_PATH = process.env.DB_PATH || path.join(process.cwd(), 'data', 'ant-app.sqlite');
-fs.mkdirSync(path.dirname(DB_PATH), { recursive: true });
+const pool = process.env.MYSQL_URL
+  ? mysql.createPool(process.env.MYSQL_URL)
+  : mysql.createPool({
+      host: process.env.MYSQL_HOST || 'localhost',
+      port: Number(process.env.MYSQL_PORT || 3306),
+      user: process.env.MYSQL_USER || 'root',
+      password: process.env.MYSQL_PASSWORD || '',
+      database: process.env.MYSQL_DATABASE || 'ant_app',
+      waitForConnections: true,
+      connectionLimit: 10,
+      charset: 'utf8mb4_general_ci',
+    });
 
-const db = new DatabaseSync(DB_PATH);
-db.exec('PRAGMA journal_mode = WAL;');
-db.exec('PRAGMA foreign_keys = ON;');
+// Runs once at startup (see index.js) — creates the schema if it isn't
+// there yet. Safe to run every boot: CREATE TABLE IF NOT EXISTS.
+export async function migrate(){
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS tenants (
+      id VARCHAR(64) PRIMARY KEY,
+      company_name VARCHAR(255) NOT NULL,
+      edition VARCHAR(16) NOT NULL DEFAULT 'full',
+      plan VARCHAR(16) NOT NULL DEFAULT 'front',
+      status VARCHAR(16) NOT NULL DEFAULT 'pending',
+      stripe_customer_id VARCHAR(64),
+      stripe_subscription_id VARCHAR(64),
+      created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+  `);
 
-db.exec(`
-  CREATE TABLE IF NOT EXISTS tenants (
-    id TEXT PRIMARY KEY,
-    company_name TEXT NOT NULL,
-    edition TEXT NOT NULL DEFAULT 'full',           -- 'front' | 'back' | 'full' — what the app shows
-    plan TEXT NOT NULL DEFAULT 'front',              -- 'front' | 'back' | 'complete' — billing plan key
-    status TEXT NOT NULL DEFAULT 'pending',          -- pending | active | past_due | canceled
-    stripe_customer_id TEXT,
-    stripe_subscription_id TEXT,
-    created_at TEXT NOT NULL DEFAULT (datetime('now'))
-  );
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS users (
+      id VARCHAR(64) PRIMARY KEY,
+      tenant_id VARCHAR(64) NOT NULL,
+      email VARCHAR(255) NOT NULL,
+      password_hash VARCHAR(255) NOT NULL,
+      name VARCHAR(255),
+      created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      UNIQUE KEY uq_users_email (email),
+      CONSTRAINT fk_users_tenant FOREIGN KEY (tenant_id) REFERENCES tenants(id) ON DELETE CASCADE
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+  `);
 
-  CREATE TABLE IF NOT EXISTS users (
-    id TEXT PRIMARY KEY,
-    tenant_id TEXT NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
-    email TEXT NOT NULL UNIQUE,
-    password_hash TEXT NOT NULL,
-    name TEXT,
-    created_at TEXT NOT NULL DEFAULT (datetime('now'))
-  );
-
-  CREATE TABLE IF NOT EXISTS tenant_data (
-    tenant_id TEXT PRIMARY KEY REFERENCES tenants(id) ON DELETE CASCADE,
-    data TEXT NOT NULL,
-    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
-  );
-`);
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS tenant_data (
+      tenant_id VARCHAR(64) PRIMARY KEY,
+      data LONGTEXT NOT NULL,
+      updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+      CONSTRAINT fk_tenant_data_tenant FOREIGN KEY (tenant_id) REFERENCES tenants(id) ON DELETE CASCADE
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+  `);
+}
 
 export function uid(prefix){
   return (prefix ? prefix + '_' : '') + crypto.randomBytes(9).toString('base64url');
 }
 
 /* ---- tenants ---- */
-export function createTenant({ id, companyName, edition, plan }){
-  db.prepare(`INSERT INTO tenants (id, company_name, edition, plan, status) VALUES (?, ?, ?, ?, 'pending')`)
-    .run(id, companyName, edition, plan);
+export async function createTenant({ id, companyName, edition, plan }){
+  await pool.query(
+    `INSERT INTO tenants (id, company_name, edition, plan, status) VALUES (?, ?, ?, ?, 'pending')`,
+    [id, companyName, edition, plan]
+  );
   return getTenant(id);
 }
-export function getTenant(id){
-  return db.prepare(`SELECT * FROM tenants WHERE id = ?`).get(id) || null;
+export async function getTenant(id){
+  const [rows] = await pool.query(`SELECT * FROM tenants WHERE id = ?`, [id]);
+  return rows[0] || null;
 }
-export function getTenantByStripeCustomer(customerId){
-  return db.prepare(`SELECT * FROM tenants WHERE stripe_customer_id = ?`).get(customerId) || null;
+export async function getTenantByStripeCustomer(customerId){
+  const [rows] = await pool.query(`SELECT * FROM tenants WHERE stripe_customer_id = ?`, [customerId]);
+  return rows[0] || null;
 }
-export function getTenantByStripeSubscription(subId){
-  return db.prepare(`SELECT * FROM tenants WHERE stripe_subscription_id = ?`).get(subId) || null;
+export async function getTenantByStripeSubscription(subId){
+  const [rows] = await pool.query(`SELECT * FROM tenants WHERE stripe_subscription_id = ?`, [subId]);
+  return rows[0] || null;
 }
-export function updateTenant(id, fields){
+export async function updateTenant(id, fields){
   const cols = Object.keys(fields);
   if(!cols.length) return getTenant(id);
   const set = cols.map(c=>`${c} = ?`).join(', ');
-  db.prepare(`UPDATE tenants SET ${set} WHERE id = ?`).run(...cols.map(c=>fields[c]), id);
+  await pool.query(`UPDATE tenants SET ${set} WHERE id = ?`, [...cols.map(c=>fields[c]), id]);
   return getTenant(id);
 }
 
 /* ---- users (platform login) ---- */
-export function createUser({ id, tenantId, email, passwordHash, name }){
-  db.prepare(`INSERT INTO users (id, tenant_id, email, password_hash, name) VALUES (?, ?, ?, ?, ?)`)
-    .run(id, tenantId, email.toLowerCase().trim(), passwordHash, name || null);
+export async function createUser({ id, tenantId, email, passwordHash, name }){
+  await pool.query(
+    `INSERT INTO users (id, tenant_id, email, password_hash, name) VALUES (?, ?, ?, ?, ?)`,
+    [id, tenantId, email.toLowerCase().trim(), passwordHash, name || null]
+  );
   return getUserById(id);
 }
-export function getUserByEmail(email){
-  return db.prepare(`SELECT * FROM users WHERE email = ?`).get(email.toLowerCase().trim()) || null;
+export async function getUserByEmail(email){
+  const [rows] = await pool.query(`SELECT * FROM users WHERE email = ?`, [email.toLowerCase().trim()]);
+  return rows[0] || null;
 }
-export function getUserById(id){
-  return db.prepare(`SELECT * FROM users WHERE id = ?`).get(id) || null;
+export async function getUserById(id){
+  const [rows] = await pool.query(`SELECT * FROM users WHERE id = ?`, [id]);
+  return rows[0] || null;
 }
 
 /* ---- tenant_data (the app's JSON blob — replaces localStorage) ---- */
-export function getTenantData(tenantId){
-  const row = db.prepare(`SELECT data FROM tenant_data WHERE tenant_id = ?`).get(tenantId);
-  return row ? JSON.parse(row.data) : null;
+export async function getTenantData(tenantId){
+  const [rows] = await pool.query(`SELECT data FROM tenant_data WHERE tenant_id = ?`, [tenantId]);
+  return rows[0] ? JSON.parse(rows[0].data) : null;
 }
-export function saveTenantData(tenantId, data){
+export async function saveTenantData(tenantId, data){
   const json = JSON.stringify(data);
-  db.prepare(`
-    INSERT INTO tenant_data (tenant_id, data, updated_at) VALUES (?, ?, datetime('now'))
-    ON CONFLICT(tenant_id) DO UPDATE SET data = excluded.data, updated_at = datetime('now')
-  `).run(tenantId, json);
+  // MySQL's upsert syntax (not SQLite/Postgres' ON CONFLICT):
+  await pool.query(
+    `INSERT INTO tenant_data (tenant_id, data) VALUES (?, ?)
+     ON DUPLICATE KEY UPDATE data = VALUES(data)`,
+    [tenantId, json]
+  );
 }
 
-export default db;
+export default pool;

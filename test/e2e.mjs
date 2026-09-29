@@ -13,6 +13,36 @@ import { fileURLToPath } from 'node:url';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const FILE_URL = 'file://' + path.join(__dirname, '..', 'dist', 'dive-erp.html');
 
+// Trip dates used throughout must stay in the future relative to whenever
+// this actually runs (the app filters bookable trips by todayISO()), so
+// they're computed from the real clock rather than hardcoded — a
+// hardcoded date quietly "expires" and fails every trip/availability
+// check downstream once the calendar catches up to it.
+function futureDate(daysFromNow){
+  const d = new Date();
+  d.setUTCDate(d.getUTCDate() + daysFromNow);
+  return d.toISOString().slice(0,10);
+}
+
+// The calendar's month view (src/modules/calendar.js renderMonth) only ever
+// shows the month it's navigated to, defaulting to the real "now" month —
+// it doesn't auto-jump to a trip's month. Any time a test needs to land
+// straight on a trip created via futureDate(), navigate to that trip's own
+// month/year explicitly instead of the bare '/calendar' (which only works
+// when the offset happens to stay inside the current calendar month).
+function calendarMonthPath(dateStr){
+  const [y, m] = dateStr.split('-');
+  return `calendar/x/month?y=${y}&m=${parseInt(m,10)}`;
+}
+
+// Matches how src/lib/util.js's fmtDate() renders a trip's date in the
+// #agl-trip dropdown (month/day only is enough to disambiguate, same as
+// the hardcoded "Sep 26"-style strings this replaces).
+function shortDate(dateStr){
+  const d = new Date(dateStr+'T00:00:00');
+  return d.toLocaleDateString('en-US', { month:'short', day:'numeric' });
+}
+
 let pass = 0, fail = 0;
 function ok(cond, msg){
   if(cond){ pass++; console.log('  ok -', msg); }
@@ -222,7 +252,8 @@ async function main(){
 
   await navTo(page, '/calendar');
   await page.click('#cal-add-trip');
-  await page.fill('#tr-date', '2026-09-25');
+  const reefTripDate = futureDate(30);
+  await page.fill('#tr-date', reefTripDate);
   await page.selectOption('#tr-boat', { label: 'Reef Runner (2 seats)' });
   await page.click('#tr-pkgs >> text=Fun Dive');
   await page.click('#tr-save');
@@ -513,7 +544,11 @@ async function main(){
   await page.click('#bf-save');
   await page.waitForTimeout(100);
 
-  await navTo(page, '/calendar');
+  // Can't use navTo here: the sidebar only has a static "calendar" link,
+  // not one for a specific month/year query string. Jump the hash router
+  // straight to the month the Reef Runner trip actually falls in.
+  await page.evaluate((hashPath)=>{ location.hash = hashPath; }, calendarMonthPath(reefTripDate));
+  await page.waitForSelector('[data-trip]');
   await page.click('[data-trip]');
   await page.waitForTimeout(100);
   await page.click('#td-rental');
@@ -756,7 +791,7 @@ async function main(){
   await page.waitForTimeout(100);
   await navTo(page, '/calendar');
   await page.click('#cal-add-trip');
-  await page.fill('#tr-date', '2026-09-27');
+  await page.fill('#tr-date', futureDate(31));
   await page.selectOption('#tr-boat', { label: 'Euro Skiff (2 seats)' });
   await page.click('#tr-pkgs >> text=Fun Dive');
   await page.click('#tr-save');
@@ -772,8 +807,11 @@ async function main(){
   await page.selectOption('#agl-guest', { label: 'Eur Payer' });
   await page.selectOption('#agl-pkg', { label: 'Fun Dive' });
   await page.waitForTimeout(150);
-  const sep27Opt = await page.locator('#agl-trip option', { hasText: 'Sep 27' }).first().getAttribute('value');
-  await page.selectOption('#agl-trip', sep27Opt);
+  // Match by boat name rather than a hardcoded date string — this dropdown
+  // also offers the Reef Runner trip (same package), and only the Euro
+  // Skiff trip (freshly created above, still has room) is the point.
+  const euroTripOpt = await page.locator('#agl-trip option', { hasText: 'Euro Skiff' }).first().getAttribute('value');
+  await page.selectOption('#agl-trip', euroTripOpt);
   await page.waitForTimeout(150);
   await page.click('#agl-gear >> .pill'); // bring own BCD — house stock is exhausted by now
   await page.waitForTimeout(150);
@@ -962,7 +1000,8 @@ async function main(){
 
   await navTo(page, '/calendar');
   await page.click('#cal-add-trip');
-  await page.fill('#tr-date', '2026-09-26');
+  const reefTripDate2 = futureDate(32);
+  await page.fill('#tr-date', reefTripDate2);
   await page.selectOption('#tr-boat', { label: 'Reef Runner (2 seats)' });
   await page.click('#tr-pkgs >> text=Fun Dive');
   await page.click('#tr-save');
@@ -977,7 +1016,7 @@ async function main(){
   await page.selectOption('#agl-guest', { label: 'Casey OW' });
   await page.selectOption('#agl-pkg', { label: 'Fun Dive' });
   await page.waitForTimeout(150);
-  const sep26Opt = await page.locator('#agl-trip option', { hasText: 'Sep 26' }).first().getAttribute('value');
+  const sep26Opt = await page.locator('#agl-trip option', { hasText: shortDate(reefTripDate2) }).first().getAttribute('value');
   await page.selectOption('#agl-trip', sep26Opt);
   await page.waitForTimeout(150);
   await page.click('#agl-gear >> .pill');
@@ -991,7 +1030,7 @@ async function main(){
   await page.selectOption('#agl-guest', { label: 'Robin Rescue' });
   await page.selectOption('#agl-pkg', { label: 'Fun Dive' });
   await page.waitForTimeout(150);
-  const sep26Opt2 = await page.locator('#agl-trip option', { hasText: 'Sep 26' }).first().getAttribute('value');
+  const sep26Opt2 = await page.locator('#agl-trip option', { hasText: shortDate(reefTripDate2) }).first().getAttribute('value');
   await page.selectOption('#agl-trip', sep26Opt2);
   await page.waitForTimeout(150);
   await page.click('#agl-gear >> .pill');
@@ -1011,6 +1050,18 @@ async function main(){
   await page.waitForTimeout(150);
   ok((await page.locator('#kiosk-results').innerText()).includes('Kiosk Guest'), 'newly added guest appears in the recent kiosk search results');
   await page.click('[data-pick]');
+  await page.waitForSelector('#kg-next');
+  ok((await page.locator('#kg-first').inputValue())==='Kiosk' && (await page.locator('#kg-last').inputValue())==='Guest', 'first/last name pre-filled by splitting the quick-added full name');
+  await page.click('#kg-next');
+  await page.waitForTimeout(100);
+  ok((await page.locator('.toast', { hasText: 'required' }).count())>0, 'a toast explains the missing mandatory field');
+  ok((await page.locator('#kg-next').count())===1, 'continuing without the mandatory details is blocked (still on the details step)');
+  await page.fill('#kg-pass', 'P1234567');
+  await page.fill('#kg-nat', 'Maldivian');
+  await page.fill('#kg-dob', '1990-01-01');
+  await page.fill('#kg-email', 'kiosk.guest@example.com');
+  await page.fill('#kg-phone', '7771234');
+  await page.click('#kg-next');
   await page.waitForSelector('#kiosk-sig');
   const sigBox = await page.locator('#kiosk-sig').boundingBox();
   await page.mouse.move(sigBox.x+20, sigBox.y+20);
@@ -1022,16 +1073,74 @@ async function main(){
   await page.click('#kiosk-save');
   await page.waitForTimeout(150);
   ok((await page.locator('#kiosk-body').innerText()).toLowerCase().includes('signed'), 'kiosk shows a signed confirmation');
-  const kioskGuestSigned = await page.evaluate(()=>{
+  const kioskGuestRecord = await page.evaluate(()=>{
     const g = Store.all('guests').find(x=>x.name==='Kiosk Guest');
-    return g && g.waiverSigned && typeof g.waiverSignatureDataUrl==='string' && g.waiverSignatureDataUrl.startsWith('data:image');
+    return g && {
+      signed: g.waiverSigned && typeof g.waiverSignatureDataUrl==='string' && g.waiverSignatureDataUrl.startsWith('data:image'),
+      firstName: g.firstName, lastName: g.lastName, passportNo: g.passportNo, nationality: g.nationality, email: g.email, phone: g.phone, isMinor: g.isMinor,
+    };
   });
-  ok(kioskGuestSigned, 'kiosk guest record updated with waiverSigned=true and a captured signature image');
+  ok(kioskGuestRecord && kioskGuestRecord.signed, 'kiosk guest record updated with waiverSigned=true and a captured signature image');
+  ok(kioskGuestRecord.firstName==='Kiosk' && kioskGuestRecord.lastName==='Guest' && kioskGuestRecord.passportNo==='P1234567' && kioskGuestRecord.nationality==='Maldivian' && kioskGuestRecord.email==='kiosk.guest@example.com' && kioskGuestRecord.phone==='7771234', 'the general/contact info collected before the waiver was saved onto the guest record: '+JSON.stringify(kioskGuestRecord));
+  ok(kioskGuestRecord.isMinor===false, 'an adult (1990 DOB) is not flagged as a minor: '+JSON.stringify(kioskGuestRecord));
   await page.click('#kiosk-exit');
   await page.waitForSelector('.sidebar');
   await navTo(page, '/guests');
   await page.waitForTimeout(100);
   ok((await page.locator('tr', { hasText: 'Kiosk Guest' }).innerText()).includes('Signed'), 'guests register shows the kiosk guest\'s waiver as Signed');
+
+  console.log('31b. Minor guest at the kiosk must give a parent/guardian name before continuing');
+  await navTo(page, '/kiosk');
+  await page.waitForSelector('#kiosk-newname');
+  await page.fill('#kiosk-newname', 'Kiosk Minor');
+  await page.click('#kiosk-newguest');
+  await page.waitForTimeout(150);
+  await page.fill('#kiosk-q', 'Kiosk Minor');
+  await page.waitForTimeout(150);
+  await page.click('[data-pick]');
+  await page.waitForSelector('#kg-next');
+  await page.fill('#kg-pass', 'M7654321');
+  await page.fill('#kg-nat', 'British');
+  const minorDob = new Date(); minorDob.setUTCFullYear(minorDob.getUTCFullYear()-10);
+  await page.fill('#kg-dob', minorDob.toISOString().slice(0,10));
+  await page.fill('#kg-email', 'minor.guardian@example.com');
+  await page.fill('#kg-phone', '7779999');
+  ok(await page.locator('#kg-guardian-wrap').isVisible(), 'guardian field appears once a date of birth under 18 years old is entered');
+  await page.click('#kg-next');
+  await page.waitForTimeout(100);
+  ok((await page.locator('.toast', { hasText: 'guardian' }).count())>0, 'continuing without a guardian name is blocked for a minor');
+  await page.fill('#kg-guardian', 'Parent Guardian');
+  await page.click('#kg-next');
+  await page.waitForSelector('#kiosk-sig');
+  const minorSigBox = await page.locator('#kiosk-sig').boundingBox();
+  await page.mouse.move(minorSigBox.x+20, minorSigBox.y+20);
+  await page.mouse.down();
+  await page.mouse.move(minorSigBox.x+120, minorSigBox.y+60);
+  await page.mouse.up();
+  await page.check('#kiosk-consent');
+  await page.click('#kiosk-save');
+  await page.waitForTimeout(150);
+  const kioskMinorRecord = await page.evaluate(()=>{
+    const g = Store.all('guests').find(x=>x.name==='Kiosk Minor');
+    return g && { isMinor: g.isMinor, guardianName: g.guardianName };
+  });
+  ok(kioskMinorRecord && kioskMinorRecord.isMinor===true && kioskMinorRecord.guardianName==='Parent Guardian', 'guest under 18 saved with isMinor=true and the guardian name: '+JSON.stringify(kioskMinorRecord));
+  await page.click('#kiosk-exit');
+  await page.waitForSelector('.sidebar');
+
+  console.log('31c. Signed waiver can be reprinted as a PDF (browser print view) from the guest profile');
+  await navTo(page, '/guests');
+  await page.click('tr:has-text("Kiosk Guest")');
+  await page.waitForSelector('#g-waiver-pdf');
+  const [printTab] = await Promise.all([
+    page.context().waitForEvent('page'),
+    page.click('#g-waiver-pdf'),
+  ]);
+  await printTab.waitForLoadState();
+  const printText = await printTab.locator('body').innerText();
+  ok(printText.includes('Kiosk Guest') && printText.includes('P1234567') && printText.includes('kiosk.guest@example.com'), 'the printable waiver page shows the guest\'s general and contact information: '+printText.replace(/\n/g,' | '));
+  ok((await printTab.locator('img').count())>0, 'the printable waiver page includes the captured signature image');
+  await printTab.close();
 
   console.log('32. Opening cash balance carries forward into a second close; other methods reset to zero');
   await page.evaluate(()=>{
@@ -1363,7 +1472,8 @@ async function main(){
 
   await navTo(page, '/calendar');
   await page.click('#cal-add-trip');
-  await page.fill('#tr-date', '2026-09-28');
+  const overrideTripDate = futureDate(33);
+  await page.fill('#tr-date', overrideTripDate);
   await page.selectOption('#tr-boat', { label: 'Override Skiff (4 seats)' });
   await page.click('#tr-pkgs >> text=Override Dive');
   await page.click('#tr-save');
@@ -1505,7 +1615,8 @@ async function main(){
 
   await navTo(page, '/calendar');
   await page.click('#cal-add-trip');
-  await page.fill('#tr-date', '2026-09-29');
+  const dsdTripDate = futureDate(34);
+  await page.fill('#tr-date', dsdTripDate);
   await page.selectOption('#tr-boat', { label: 'Override Skiff (4 seats)' });
   await page.click('#tr-pkgs >> text=DSD Dive');
   await page.click('#tr-save');
@@ -1539,10 +1650,10 @@ async function main(){
   ok(dsdQtyVal==='2', 'Qty column on the booking shows 2 for the DSD guest line: '+dsdQtyVal);
   ok((await dsdRow.innerText()).includes('160.00'), 'price cell on the booking shows the qty extension total (160.00) for 2 dives: '+(await dsdRow.innerText()).replace(/\n/g,' | '));
 
-  const seatCount = await page.evaluate(()=>{
-    const trip = Store.all('trips').find(t=>t.tripDate==='2026-09-29');
+  const seatCount = await page.evaluate((tripDateArg)=>{
+    const trip = Store.all('trips').find(t=>t.tripDate===tripDateArg);
     return Availability.activeGuestLinesOnTrip(trip.id).length;
-  });
+  }, dsdTripDate);
   ok(seatCount===1, 'qty=2 dives on one guest line still counts as only 1 seat on the trip (billing multiplier only): '+seatCount);
 
   // Bumping qty to 5 needs 5 Tank Fills, but only 2 are in stock — the gear
@@ -1571,8 +1682,8 @@ async function main(){
 
   console.log('41. Agent direct-collect commission, mixed-status booking auto-derivation, and per-guest-line rate lock');
   // Fresh agent, priced lower than Direct, on the trip/boat already set up in
-  // section 40 (Override Skiff, 2026-09-28, Override Dive) — it has 2 free
-  // seats left (Override Guest One/Two used 2 of 4).
+  // section 40 (Override Skiff, Override Dive) — it has 2 free seats left
+  // (Override Guest One/Two used 2 of 4).
   await navTo(page, '/customers');
   await page.click('#c-add');
   await page.fill('#cf-name', 'Small Agency');
@@ -1607,7 +1718,7 @@ async function main(){
   await page.selectOption('#agl-guest', { label: 'Agent Guest A' });
   await page.selectOption('#agl-pkg', { label: 'Override Dive' });
   await page.waitForTimeout(150);
-  const sep28OptA = await page.locator('#agl-trip option', { hasText: 'Sep 28' }).first().getAttribute('value');
+  const sep28OptA = await page.locator('#agl-trip option', { hasText: shortDate(overrideTripDate) }).first().getAttribute('value');
   await page.selectOption('#agl-trip', sep28OptA);
   await page.waitForTimeout(150);
   const agentGuestAvail = await page.locator('#agl-avail').innerText();
@@ -1619,7 +1730,7 @@ async function main(){
   await page.selectOption('#agl-guest', { label: 'Agent Guest B' });
   await page.selectOption('#agl-pkg', { label: 'Override Dive' });
   await page.waitForTimeout(150);
-  const sep28OptB = await page.locator('#agl-trip option', { hasText: 'Sep 28' }).first().getAttribute('value');
+  const sep28OptB = await page.locator('#agl-trip option', { hasText: shortDate(overrideTripDate) }).first().getAttribute('value');
   await page.selectOption('#agl-trip', sep28OptB);
   await page.waitForTimeout(150);
   await page.click('#agl-save');

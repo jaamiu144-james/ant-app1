@@ -81,8 +81,10 @@
             <dt>Cert. number</dt><dd>${esc(g.certNo||'—')}</dd>
             <dt>Medical form</dt><dd>${g.medicalDate?`Signed ${fmtDate(g.medicalDate)}`:'<span class="badge badge-amber">Not on file</span>'}</dd>
             <dt>Waiver</dt><dd>${g.waiverSigned?`<span class="badge badge-green">Signed ${g.waiverDate?fmtDate(g.waiverDate):''}</span>${g.waiverTemplateName?` <span class="small muted">(${esc(g.waiverTemplateName)})</span>`:''}`:'<span class="badge badge-amber">Not signed</span>'}</dd>
+            ${g.isMinor?`<dt>Parent / guardian</dt><dd>${esc(g.guardianName||'—')}</dd>`:''}
           </dl>
           ${g.waiverSignatureDataUrl?`<div class="mt-12"><div class="small muted mb-4">Signature ${g.waiverSignedAt?'— '+fmtDateTime(g.waiverSignedAt):''}</div><img src="${g.waiverSignatureDataUrl}" style="max-width:280px;border:1px solid var(--line);border-radius:8px;background:#fff"></div>`:''}
+          ${g.waiverSigned?`<button class="btn btn-sm mt-12" id="g-waiver-pdf">Waiver PDF</button>`:''}
           ${g.notes?`<p class="small muted mt-12">${esc(g.notes)}</p>`:''}
         </div>
       </div>
@@ -101,6 +103,7 @@
       </div>
     `;
     if(qs('#g-edit')) qs('#g-edit').addEventListener('click', ()=>openGuestForm(g));
+    if(qs('#g-waiver-pdf')) qs('#g-waiver-pdf').addEventListener('click', ()=>WaiversModule.openWaiverPrint(g));
   }
 
   function openGuestForm(existing){

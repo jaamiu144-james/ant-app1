@@ -20,8 +20,6 @@ const MODULE_ORDER = [
   'payroll.js','tax.js','accounts.js','reports.js','settings.js','waivers.js','dashboard.js'
 ];
 
-const FAVICON = "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Crect width='24' height='24' rx='5' fill='%230b5d56'/%3E%3Cg fill='none' stroke='%23f5ead9' stroke-width='1.7' stroke-linecap='round' stroke-linejoin='round'%3E%3Ccircle cx='12' cy='6.3' r='1.7'/%3E%3Ccircle cx='12' cy='11.2' r='2.3'/%3E%3Ccircle cx='12' cy='16.8' r='2.7'/%3E%3Cpath d='M12 8v1.1M12 13.3v1.1'/%3E%3Cpath d='M9.7 4.7 7.3 3M14.3 4.7 16.7 3'/%3E%3Cpath d='M4.3 9.3l4.3 1.9M19.7 9.3l-4.3 1.9'/%3E%3Cpath d='M3.4 13l5.2 1M20.6 13l-5.2 1'/%3E%3Cpath d='M4.3 19.5l5.2-3.3M19.7 19.5l-5.2-3.3'/%3E%3C/g%3E%3C/svg%3E";
-
 function read(p){ return fs.readFileSync(p, 'utf8'); }
 
 let cachedShell = null;
@@ -47,7 +45,11 @@ export function renderAppHtml({ edition }){
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Ant App</title>
-<link rel="icon" href="${FAVICON}">
+<link rel="icon" href="/icons/favicon-32.png">
+<link rel="apple-touch-icon" href="/icons/apple-touch-icon.png">
+<link rel="manifest" href="/manifest.webmanifest">
+<meta name="theme-color" content="#0b5d56">
+<script src="/pwa-install.js" defer></script>
 <style>
 ${css}
 </style>
