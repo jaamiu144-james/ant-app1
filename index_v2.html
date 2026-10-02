@@ -1089,6 +1089,39 @@ const Auth = (function(){
   function setCurrentUser(id){ localStorage.setItem(SESSION_KEY, id); }
   function signOut(){ localStorage.removeItem(SESSION_KEY); }
 
+  // ---- Per-user password ----------------------------------------------
+  // Still "not secure authentication" (see file header) — there's no
+  // server, and this app is often opened straight off disk rather than
+  // over https, so it can't lean on the Web Crypto API (crypto.subtle
+  // needs a secure context, which a file:// page isn't guaranteed to be).
+  // This is a salted, multi-round digest so a password at least isn't
+  // sitting in localStorage/the save file as plain text — enough to stop
+  // someone glancing at the data, not a cryptographic guarantee.
+  function makeSalt(){ return Math.random().toString(36).slice(2)+Date.now().toString(36); }
+  function hashPassword(plain, salt){
+    const s = String(salt)+'|'+String(plain);
+    let h1 = 0, h2 = 0;
+    for(let i=0;i<s.length;i++){
+      const c = s.charCodeAt(i);
+      h1 = (Math.imul(h1, 31) + c) | 0;
+      h2 = (Math.imul(h2, 131) + c + i) | 0;
+    }
+    for(let r=0;r<2000;r++){
+      h1 = (Math.imul(h1 ^ h2, 2654435761) + r) | 0;
+      h2 = (Math.imul(h2 ^ h1, 2246822519) + r) | 0;
+    }
+    return (h1>>>0).toString(16).padStart(8,'0') + (h2>>>0).toString(16).padStart(8,'0');
+  }
+  function setPassword(userId, plain){
+    const salt = makeSalt();
+    Store.update('users', userId, { passwordSalt: salt, passwordHash: hashPassword(plain, salt) });
+  }
+  function hasPassword(user){ return !!(user && user.passwordHash && user.passwordSalt); }
+  function verifyPassword(user, plain){
+    if(!hasPassword(user)) return false;
+    return hashPassword(plain, user.passwordSalt) === user.passwordHash;
+  }
+
   function isViewOnly(user){
     const u = user || currentUser();
     if(!u) return false;
@@ -1135,7 +1168,8 @@ const Auth = (function(){
     get ROLES(){ return roles().map(r=>r.id); },
     get ROLE_LABEL(){ const m={}; roles().forEach(r=>m[r.id]=r.label); return m; },
     roles, roleDef, roleLabel,
-    currentUser, setCurrentUser, signOut, can, isViewOnly, isKioskOnly
+    currentUser, setCurrentUser, signOut, can, isViewOnly, isKioskOnly,
+    setPassword, hasPassword, verifyPassword
   };
 })();
 
@@ -8458,12 +8492,13 @@ window.Posting = Posting;
     qs('#st-body').innerHTML = `
       <div class="toolbar"><div class="spacer"></div>${vo?'':`<button class="btn btn-primary" id="us-add">+ Add user</button>`}</div>
       <div class="table-wrap"><table class="t">
-        <thead><tr><th>Name</th><th>Role</th><th>Status</th><th></th></tr></thead>
+        <thead><tr><th>Name</th><th>Role</th><th>Status</th><th>Password</th><th></th></tr></thead>
         <tbody>${users.map(u=>`<tr><td><strong>${esc(u.name)}</strong></td><td>${esc(Auth.roleLabel(u.role))}</td>
           <td>${u.active!==false?'<span class="badge badge-green">Active</span>':'<span class="badge badge-gray">Inactive</span>'}</td>
+          <td>${Auth.hasPassword(u)?'<span class="badge badge-green">Set</span>':'<span class="badge badge-amber">Not set</span>'}</td>
           <td class="row-actions">${vo?'':`<button class="btn btn-sm" data-edit="${u.id}">Edit</button>`}</td></tr>`).join('')}</tbody>
       </table></div>
-      <div class="help-box mt-16">This is role separation for accountability, not secure login — anyone using this computer can switch users from the top bar.</div>
+      <div class="help-box mt-16">This is role separation for accountability, not secure login — there's no server to authenticate against. Switching into a user from the top bar now asks for that user's password, so it's at least not a zero-friction swap.</div>
     `;
     if(qs('#us-add')) qs('#us-add').addEventListener('click', ()=>openUserForm());
     qsa('[data-edit]').forEach(b=>b.addEventListener('click', ()=>openUserForm(Store.find('users', b.dataset.edit))));
@@ -8513,6 +8548,7 @@ window.Posting = Posting;
   }
 
   function openUserForm(existing){
+    const hasPw = Auth.hasPassword(existing);
     openModal({
       title: existing?'Edit user':'Add user',
       bodyHtml: `
@@ -8521,14 +8557,30 @@ window.Posting = Posting;
           <select id="uf-role">${Auth.ROLES.map(r=>`<option value="${r}" ${existing&&existing.role===r?'selected':''}>${Auth.ROLE_LABEL[r]}</option>`).join('')}</select>
         </div>
         <label class="checkline"><input type="checkbox" id="uf-active" ${!existing||existing.active!==false?'checked':''}> Active</label>
+        <hr class="divider">
+        <div class="field">
+          <label>${existing?'New password':'Password *'}</label>
+          <input id="uf-pw" type="password" autocomplete="new-password">
+          <span class="hint">${existing?'Leave both password fields blank to keep '+(hasPw?"the current password":"this user without a password")+'.':'At least 4 characters. The administrator sets this — share it with the user separately.'}</span>
+        </div>
+        <div class="field"><label>${existing?'Confirm new password':'Confirm password *'}</label><input id="uf-pw2" type="password" autocomplete="new-password"></div>
+        ${existing&&!hasPw?`<div class="warn-box mb-12">This user has no password yet — anyone can switch into this account from the top bar. Set one above to require it.</div>`:''}
       `,
       footerHtml: `<button class="btn" data-close>Cancel</button><button class="btn btn-primary" id="uf-save">Save</button>`,
       onMount(modal){
         qs('#uf-save', modal).addEventListener('click', ()=>{
           const name = qs('#uf-name', modal).value.trim();
           if(!name){ toast('Enter a name.', 'err'); return; }
+          const pw = qs('#uf-pw', modal).value;
+          const pw2 = qs('#uf-pw2', modal).value;
+          if(!existing && !pw){ toast('Set a password for this user.', 'err'); return; }
+          if(pw || pw2){
+            if(pw.length<4){ toast('Password must be at least 4 characters.', 'err'); return; }
+            if(pw!==pw2){ toast('Passwords do not match.', 'err'); return; }
+          }
           const data = { name, role: qs('#uf-role', modal).value, active: qs('#uf-active', modal).checked };
-          if(existing) Store.update('users', existing.id, data); else Store.insert('users', data);
+          const saved = existing ? (Store.update('users', existing.id, data), existing) : Store.insert('users', data);
+          if(pw) Auth.setPassword(saved.id, pw);
           closeModal(); toast('User saved', 'ok'); renderShell(); Router.render();
         });
       }
@@ -9402,7 +9454,42 @@ function renderTopbarRight(){
     ${window.CLOUD_MODE?`<button class="btn btn-sm" id="cloud-logout" title="Sign out of ${esc(Store.settings.companyName||'your')} account">Log out</button>`:''}
   `;
   const sel = qs('#user-switch', right);
-  if(sel) sel.addEventListener('change', ()=>{ Auth.setCurrentUser(sel.value); renderTopbarRight(); Router.render(); });
+  if(sel) sel.addEventListener('change', ()=>{
+    const target = Store.find('users', sel.value);
+    if(!target || (cur && target.id===cur.id)) return;
+    if(!Auth.hasPassword(target)){
+      // No password set on this user yet — nothing to check against.
+      Auth.setCurrentUser(target.id); renderTopbarRight(); Router.render();
+      return;
+    }
+    openModal({
+      title: `Switch to ${target.name}`,
+      bodyHtml: `<div class="field"><label>Password for ${esc(target.name)}</label><input id="us-pw" type="password" autocomplete="current-password"></div>`,
+      footerHtml: `<button class="btn" data-close>Cancel</button><button class="btn btn-primary" id="us-pw-go">Switch user</button>`,
+      onMount(modal){
+        // Cancelling (the X, the Cancel button, or clicking outside) all
+        // just call the shared closeModal() via [data-close] — none of
+        // them know to put the <select> back to the still-current user,
+        // so re-render the whole topbar-right block on any of those exits
+        // too; it reads the real Auth.currentUser(), so it self-corrects.
+        qsa('[data-close]', modal).forEach(b=>b.addEventListener('click', renderTopbarRight));
+        if(modal.parentElement) modal.parentElement.addEventListener('mousedown', (e)=>{ if(e.target===modal.parentElement) renderTopbarRight(); });
+        const input = qs('#us-pw', modal);
+        input.focus();
+        const tryGo = ()=>{
+          if(Auth.verifyPassword(target, input.value)){
+            closeModal();
+            Auth.setCurrentUser(target.id); renderTopbarRight(); Router.render();
+          } else {
+            toast('Wrong password.', 'err');
+            input.value=''; input.focus();
+          }
+        };
+        qs('#us-pw-go', modal).addEventListener('click', tryGo);
+        input.addEventListener('keydown', e=>{ if(e.key==='Enter') tryGo(); });
+      }
+    });
+  });
   const logoutBtn = qs('#cloud-logout', right);
   if(logoutBtn) logoutBtn.addEventListener('click', ()=>{ if(window.CloudSync) CloudSync.logout(); });
 }
@@ -9440,13 +9527,21 @@ function renderSetupWizard(){
             <option value="OWNER">Owner — view everything, change nothing</option>
           </select>
         </div>
+        <div class="form-row">
+          <div class="field"><label>Password *</label><input id="su-pw" type="password" autocomplete="new-password"></div>
+          <div class="field"><label>Confirm password *</label><input id="su-pw2" type="password" autocomplete="new-password"></div>
+        </div>
+        <p class="hint mb-8">At least 4 characters. You'll need this to switch into this user later.</p>
         <button class="btn btn-primary btn-block mt-12" id="su-go">Start using the app</button>
       </div>
     </div>`;
   qs('#su-go').addEventListener('click', ()=>{
     const name = qs('#su-name').value.trim();
     const userName = qs('#su-user').value.trim();
+    const pw = qs('#su-pw').value, pw2 = qs('#su-pw2').value;
     if(!name || !userName){ toast('Please fill in the company name and your name.', 'err'); return; }
+    if(!pw || pw.length<4){ toast('Set a password of at least 4 characters.', 'err'); return; }
+    if(pw!==pw2){ toast('Passwords do not match.', 'err'); return; }
     Object.assign(Store.settings, {
       companyName: name,
       currency: qs('#su-cur').value.trim().toUpperCase()||'USD',
@@ -9455,6 +9550,7 @@ function renderSetupWizard(){
       setupComplete: true
     });
     const user = Store.insert('users', { name:userName, role: qs('#su-role').value, active:true });
+    Auth.setPassword(user.id, pw);
     Auth.setCurrentUser(user.id);
     Store.persist();
     // Not boot() — Store already holds the freshly-set-up data in memory;
