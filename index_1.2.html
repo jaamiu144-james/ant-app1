@@ -588,6 +588,7 @@ const COLLECTIONS = [
   'packages','priceLists','agentPrices',
   'boats','staff','tripTemplates','trips','closures',
   'bookings','salesInvoices',
+  'roomTypes','rooms','reservations',
   'receipts','vouchers','bills',
   'pettyCashConfig', // legacy single object — kept only so old saves migrate cleanly; unused by new code
   'pettyCashFloats',
@@ -609,6 +610,7 @@ function emptyDb(){
 
 function defaultSettings(){
   return {
+    businessType: 'DIVE', // 'DIVE' | 'EXCURSION' | 'GUESTHOUSE' — see businesstype.js
     companyName: 'Dive Squad',
     companyAddress: '',
     currency: 'USD',
@@ -923,6 +925,24 @@ function seedChartOfAccounts(){
 function acctByCode(code){ return DB.accounts.find(a=>a.code===code); }
 function acctId(code){ const a = acctByCode(code); return a ? a.id : null; }
 
+// Records which business-type vertical this install/tenant is set up as
+// (see businesstype.js) and renames the handful of chart-of-accounts
+// entries that differ per vertical (e.g. "Dive Package Revenue" ->
+// "Room Revenue") to match. Account CODES never change here — every
+// posting/report function keys off the fixed STANDARD_ACCOUNTS codes
+// regardless of vertical, so this is a display-name rename only, safe to
+// call any time (normally once, from the setup wizard, right after the
+// chart of accounts is first seeded).
+function setBusinessType(typeId){
+  const def = (window.BusinessTypes && BusinessTypes.TYPES[typeId]) || null;
+  if(!def) return;
+  DB.settings.businessType = typeId;
+  Object.entries(def.coaOverrides||{}).forEach(([code, name])=>{
+    const a = acctByCode(code);
+    if(a) a.name = name;
+  });
+}
+
 // One-time, idempotent migration: remaps any account still carrying an old
 // (pre-v2) code to its standard replacement. Runs only while
 // DB.schemaVersion < 2; a fresh install seeds directly with the new codes
@@ -1046,7 +1066,7 @@ const Store = {
   load, persist, subscribe, initFromData,
   all, find, where, insert, update, remove,
   uid, docNo, nextSeq, log,
-  acctByCode, acctId,
+  acctByCode, acctId, setBusinessType,
   exportJson, importJson, resetAll,
   STANDARD_ACCOUNTS,
   get db(){ return DB; },
@@ -1054,6 +1074,100 @@ const Store = {
 };
 
 window.Store = Store;
+
+
+/* ---- lib/businesstype.js ---- */
+/* ---------------------------------------------------------------------
+   businesstype.js — the one place that knows the differences between the
+   three verticals this app now ships for: Dive Centre, Excursion Centre,
+   and Guesthouse. Everything else (ledger, payroll, tax, bills, cash —
+   the whole back office) is already generic and needs no awareness of
+   this at all.
+
+   What a business type actually changes:
+   - `terms`: a small dictionary of user-facing nouns. The Dive Centre and
+     Excursion Centre share the exact same booking engine (trips, boats,
+     equipment, manifest) — only the words on screen differ, via T('Trip')
+     etc. in those modules.
+   - `navKey`: 'TRIP_BASED' (Dive/Excursion) or 'ROOM_BASED' (Guesthouse) —
+     which NAV items apply (see app.js's `biz` filter) and which module set
+     is reachable at all. A Guesthouse's booking side is NOT a relabeled
+     trip/boat model (rooms/nights/folio don't fit that shape) — it's its
+     own module (rooms.js, reservations.js).
+   - `coaOverrides`: a handful of chart-of-accounts account NAMES (never
+     codes — every report/posting function keys off the fixed codes in
+     store.js's STANDARD_ACCOUNTS) renamed to fit the vertical, e.g. "Dive
+     Package Revenue" -> "Room Revenue". Applied once at setup via
+     Store.setBusinessType().
+--------------------------------------------------------------------- */
+
+const BusinessTypes = (function(){
+  const TYPES = {
+    DIVE: {
+      id: 'DIVE', label: 'Dive Centre',
+      blurb: 'Boat dive trips, equipment rental, and dive packages.',
+      navKey: 'TRIP_BASED',
+      terms: {
+        Trip:'Dive trip', trip:'dive trip', Trips:'Dive trips', trips:'dive trips',
+        Boat:'Boat', boat:'boat', Boats:'Boats', boats:'boats',
+        Manifest:'Trip manifest',
+        Equipment:'Equipment', equipment:'equipment',
+        Gear:'Gear', gear:'gear',
+        Package:'Package', package:'package', Packages:'Packages', packages:'packages',
+        Business:'Dive Centre'
+      },
+      coaOverrides: {}
+    },
+    EXCURSION: {
+      id: 'EXCURSION', label: 'Excursion Centre',
+      blurb: 'Tours, safaris, or outings run on a vehicle/boat with a schedule — the same booking engine as a Dive Centre, relabeled.',
+      navKey: 'TRIP_BASED',
+      terms: {
+        Trip:'Excursion', trip:'excursion', Trips:'Excursions', trips:'excursions',
+        Boat:'Vehicle', boat:'vehicle', Boats:'Vehicles', boats:'vehicles',
+        Manifest:'Roster',
+        Equipment:'Gear', equipment:'gear',
+        Gear:'Gear', gear:'gear',
+        Package:'Excursion package', package:'excursion package', Packages:'Excursion packages', packages:'excursion packages',
+        Business:'Excursion Centre'
+      },
+      coaOverrides: {
+        '1500':'Vehicles & Gear (Fixed Assets)',
+        '1510':'Accumulated Depreciation — Vehicles & Gear',
+        '4000':'Excursion Package Revenue',
+        '5000':'Cost of Excursions (Fuel, Crew)',
+        '5010':'Vehicle & Gear Rental (Overflow)',
+        '5020':'Vehicle & Gear Maintenance'
+      }
+    },
+    GUESTHOUSE: {
+      id: 'GUESTHOUSE', label: 'Guesthouse',
+      blurb: 'Room/night stays with a front desk, housekeeping status, and guest folios — a different booking model from the other two.',
+      navKey: 'ROOM_BASED',
+      terms: { Business:'Guesthouse' },
+      coaOverrides: {
+        '1500':'Property & Furnishings (Fixed Assets)',
+        '1510':'Accumulated Depreciation — Property & Furnishings',
+        '4000':'Room Revenue',
+        '5000':'Housekeeping & Laundry Cost',
+        '5010':'Guest Supplies & Amenities',
+        '5020':'Property Maintenance & Repairs'
+      }
+    }
+  };
+
+  function current(){ return (Store && Store.settings && Store.settings.businessType) || 'DIVE'; }
+  function get(id){ return TYPES[id || current()] || TYPES.DIVE; }
+  function navKey(){ return get().navKey; }
+  function term(key){ const t = get().terms; return (t && t[key]) || key; }
+  function list(){ return Object.values(TYPES); }
+
+  return { TYPES, current, get, navKey, term, list };
+})();
+window.BusinessTypes = BusinessTypes;
+
+// Shorthand used throughout the UI modules: T('Trip') / T('Boat') / etc.
+function T(key){ return BusinessTypes.term(key); }
 
 
 /* ---- lib/auth.js ---- */
@@ -1832,6 +1946,39 @@ const Posting = (function(){
     return createdIds.map(id=>Store.find('salesInvoices', id));
   }
 
+  /* ---- Guesthouse reservation folio invoice: posted once, at check-out,
+     once nights/rate/extras are final (mirrors postBookingInvoice's shape
+     but for the much simpler single-room, base-currency-only Guesthouse
+     model — see reservations.js). Idempotent via reservation.invoiceJournalId. ---- */
+  function postReservationInvoice(reservation){
+    if(reservation.invoiceJournalId) return Store.find('journalEntries', reservation.invoiceJournalId);
+    const customer = Store.find('customers', reservation.customerId);
+    if(!customer) throw new Error('Reservation has no customer.');
+    const arAccount = customer.type==='AGENT' ? Store.acctId('1110') : Store.acctId('1120');
+    const roomAccount = Store.acctId('4000');
+    const extrasAccount = Store.acctId('4010');
+    const taxAccount = Store.acctId('2100');
+    const rate = Ledger.round2(reservation.rate||0);
+    const nights = reservation.nights||0;
+    const roomTotal = Ledger.round2(rate*nights);
+    const extrasTotal = Ledger.round2((reservation.extras||[]).reduce((s,e)=>s+(e.amount||0),0));
+    const subTotal = Ledger.round2(roomTotal+extrasTotal);
+    const taxRate = (Store.settings.defaultTaxRate||0)/100;
+    const taxTotal = Ledger.round2(subTotal*taxRate);
+
+    const jeLines = [{ accountId: arAccount, debit: Ledger.round2(subTotal+taxTotal), credit:0, partyType:'customer', partyId:customer.id, memo:'Reservation '+reservation.reservationNo }];
+    if(roomTotal>0.004) jeLines.push({ accountId: roomAccount, debit:0, credit: roomTotal, memo:'Room charge — '+reservation.reservationNo });
+    if(extrasTotal>0.004) jeLines.push({ accountId: extrasAccount, debit:0, credit: extrasTotal, memo:'Extras — '+reservation.reservationNo });
+    if(taxTotal>0.004) jeLines.push({ accountId: taxAccount, debit:0, credit: taxTotal, memo:'Output tax — reservation '+reservation.reservationNo });
+
+    const je = Ledger.post({
+      date: todayISO(), ref: reservation.reservationNo, description: `Folio for reservation ${reservation.reservationNo} (${customer.name})`,
+      sourceType:'reservation', sourceId: reservation.id, lines: jeLines
+    });
+    Store.update('reservations', reservation.id, { invoiceJournalId: je.id, invoiceTotal: Ledger.round2(subTotal+taxTotal), invoiceTax: taxTotal, invoiceSub: subTotal });
+    return je;
+  }
+
   /* ---- Receipt from a customer (deposit or balance). CASH lands in the
      currency-specific Cash on Hand control account, CARD/BANK/custom methods
      settle to their configured clearing/bank account. FOB ("free of bill" —
@@ -2094,7 +2241,8 @@ const Posting = (function(){
   function nowISO(){ return new Date().toISOString(); }
 
   return { postBookingInvoice, generateSalesInvoice, postReceipt, postAgentCommission, postBill, postVoucher, postAdvance, postPayrollRun,
-           postDayEndClose, postDeposit, taxRateFor, billableLines, clearingAccountForMethod, resolveMethodAccountId, methodDef, pettyFloatFor };
+           postDayEndClose, postDeposit, taxRateFor, billableLines, clearingAccountForMethod, resolveMethodAccountId, methodDef, pettyFloatFor,
+           postReservationInvoice };
 })();
 
 window.Posting = Posting;
@@ -2637,7 +2785,7 @@ window.Posting = Posting;
 (function(){
 
   function render(params){
-    setPageTitle('Equipment', 'Catalog');
+    setPageTitle(T('Equipment'), 'Catalog');
     renderNav();
     const tab = params.sub || 'items';
     qs('#content').innerHTML = `
@@ -2907,7 +3055,7 @@ window.Posting = Posting;
   let draftKit = []; // [{equipmentTypeId, qtyPerGuest}] while the form is open
 
   function render(params){
-    setPageTitle('Packages & kits', 'Catalog');
+    setPageTitle(T('Package')+'s & kits', 'Catalog');
     renderNav();
     const rows = Store.all('packages').slice().sort((a,b)=> (a.kind==='ADDON'?1:0)-(b.kind==='ADDON'?1:0) || a.name.localeCompare(b.name));
     const vo = Auth.isViewOnly();
@@ -3234,12 +3382,12 @@ window.Posting = Posting;
 (function(){
 
   function render(params){
-    setPageTitle('Boats & staff', 'Catalog');
+    setPageTitle(T('Boats')+' & staff', 'Catalog');
     renderNav();
     const tab = params.sub || 'boats';
     qs('#content').innerHTML = `
       <div class="tabs">
-        <div class="tab ${tab==='boats'?'active':''}" data-tab="boats">Boats</div>
+        <div class="tab ${tab==='boats'?'active':''}" data-tab="boats">${esc(T('Boats'))}</div>
         <div class="tab ${tab==='staff'?'active':''}" data-tab="staff">Staff</div>
       </div>
       <div id="fl-body"></div>
@@ -3276,7 +3424,7 @@ window.Posting = Posting;
     openModal({
       title: existing?'Edit boat':'Add boat',
       bodyHtml: `
-        <div class="field"><label>Boat name</label><input id="bf-name" type="text" value="${esc(existing?existing.name:'')}"></div>
+        <div class="field"><label>${esc(T('Boat'))} name</label><input id="bf-name" type="text" value="${esc(existing?existing.name:'')}"></div>
         <div class="field"><label>Seats</label><input id="bf-seats" type="number" min="1" value="${existing?existing.seats:8}"></div>
         <label class="checkline"><input type="checkbox" id="bf-rental" ${existing&&existing.rental?'checked':''}> This is a rental boat (overflow capacity from a vendor)</label>
         <div class="field mt-8" id="bf-vendor-wrap" style="display:${existing&&existing.rental?'':'none'}">
@@ -3292,7 +3440,7 @@ window.Posting = Posting;
           const data = { name, seats: parseInt(qs('#bf-seats', modal).value)||1, active:true,
             rental: qs('#bf-rental', modal).checked, vendorId: qs('#bf-rental', modal).checked ? (qs('#bf-vendor', modal).value||null) : null };
           if(existing) Store.update('boats', existing.id, data); else Store.insert('boats', data);
-          closeModal(); toast('Boat saved', 'ok'); renderBoats();
+          closeModal(); toast(T('Boat')+' saved', 'ok'); renderBoats();
         });
       }
     });
@@ -3486,7 +3634,7 @@ window.Posting = Posting;
       <div class="tabs">
         <div class="tab ${tab==='month'?'active':''}" data-tab="month">Month</div>
         <div class="tab ${tab==='day'?'active':''}" data-tab="day">Day</div>
-        <div class="tab ${tab==='templates'?'active':''}" data-tab="templates">Trip templates</div>
+        <div class="tab ${tab==='templates'?'active':''}" data-tab="templates">${esc(T('Trip'))} templates</div>
         <div class="tab ${tab==='closures'?'active':''}" data-tab="closures">Closures</div>
       </div>
       <div id="cal-body"></div>
@@ -3613,22 +3761,22 @@ window.Posting = Posting;
     const seatLimit = Availability.effectiveSeatLimit(t);
     const freelancers = (t.freelancers||[]);
     openModal({
-      title: `Trip ${esc(t.tripNo||'')} — ${fmtDate(t.tripDate)} ${t.startTime||''}`,
+      title: `${esc(T('Trip'))} ${esc(t.tripNo||'')} — ${fmtDate(t.tripDate)} ${t.startTime||''}`,
       bodyHtml: `
         <dl class="kv">
-          <dt>Trip #</dt><dd>${esc(t.tripNo||'—')}</dd>
-          <dt>Boat</dt><dd>${esc(boat?boat.name:'—')}${rentalBoat?` + rental: ${esc(rentalBoat.name)}`:''}</dd>
+          <dt>${esc(T('Trip'))} #</dt><dd>${esc(t.tripNo||'—')}</dd>
+          <dt>${esc(T('Boat'))}</dt><dd>${esc(boat?boat.name:'—')}${rentalBoat?` + rental: ${esc(rentalBoat.name)}`:''}</dd>
           <dt>Seats</dt><dd>${lines.length} of ${seatLimit}</dd>
           <dt>Status</dt><dd>${statusBadge(t.status)}</dd>
           ${freelancers.length?`<dt>Freelancers</dt><dd>${freelancers.map(f=>{ const s=Store.find('staff',f.staffId); return `${esc(s?s.name:'—')} (${fmtMoney(f.commission)})`; }).join(', ')}</dd>`:''}
         </dl>
         <div class="divider"></div>
         <div class="flex-gap wrap">
-          ${vo?'':`<button class="btn btn-sm" id="td-edit">Edit trip</button>`}
-          <button class="btn btn-sm" id="td-manifest">Open manifest</button>
-          ${!vo?`<button class="btn btn-sm" id="td-rental">+ Rental boat (overflow)</button>
+          ${vo?'':`<button class="btn btn-sm" id="td-edit">Edit ${esc(T('trip'))}</button>`}
+          <button class="btn btn-sm" id="td-manifest">Open ${esc(T('manifest'))}</button>
+          ${!vo?`<button class="btn btn-sm" id="td-rental">+ Rental ${esc(T('boat'))} (overflow)</button>
           <button class="btn btn-sm" id="td-freelancer">+ Assign freelancer</button>`:''}
-          ${t.status!=='CANCELLED' && !vo ? `<button class="btn btn-sm btn-danger" id="td-cancel">Cancel trip</button>` : ''}
+          ${t.status!=='CANCELLED' && !vo ? `<button class="btn btn-sm btn-danger" id="td-cancel">Cancel ${esc(T('trip'))}</button>` : ''}
         </div>
       `,
       footerHtml: `<button class="btn" data-close>Close</button>`,
@@ -3639,10 +3787,10 @@ window.Posting = Posting;
         if(qs('#td-freelancer', modal)) qs('#td-freelancer', modal).addEventListener('click', ()=>{ closeModal(); openFreelancerForm(t); });
         const cancelBtn = qs('#td-cancel', modal);
         if(cancelBtn) cancelBtn.addEventListener('click', ()=>{
-          confirmDialog('Cancel this trip? Guests on it will need to be rescheduled or refunded from their bookings.', ()=>{
+          confirmDialog(`Cancel this ${T('trip')}? Guests on it will need to be rescheduled or refunded from their bookings.`, ()=>{
             Store.update('trips', t.id, { status:'CANCELLED' });
-            closeModal(); toast('Trip cancelled'); Router.render();
-          }, {danger:true, yesLabel:'Cancel trip'});
+            closeModal(); toast(T('Trip')+' cancelled'); Router.render();
+          }, {danger:true, yesLabel:'Cancel '+T('trip')});
         });
       }
     });
@@ -3714,14 +3862,14 @@ window.Posting = Posting;
     const packages = Store.all('packages').filter(p=>p.kind!=='ADDON' && p.active!==false);
     const src = existing || {};
     openModal({
-      title: existing && existing.id ? 'Edit trip' : 'Add trip', size:'lg',
+      title: existing && existing.id ? 'Edit '+T('trip') : 'Add '+T('trip'), size:'lg',
       bodyHtml: `
         <div class="form-row">
           <div class="field"><label>Date</label><input id="tr-date" type="date" value="${src.tripDate||''}"></div>
           <div class="field"><label>Start time</label><input id="tr-time" type="time" value="${src.startTime||'08:00'}"></div>
         </div>
         <div class="form-row">
-          <div class="field"><label>Boat</label><select id="tr-boat">${boats.map(b=>`<option value="${b.id}" ${src.boatId===b.id?'selected':''}>${esc(b.name)} (${b.seats} seats)</option>`).join('')}</select></div>
+          <div class="field"><label>${esc(T('Boat'))}</label><select id="tr-boat">${boats.map(b=>`<option value="${b.id}" ${src.boatId===b.id?'selected':''}>${esc(b.name)} (${b.seats} seats)</option>`).join('')}</select></div>
           <div class="field"><label>Seat limit <span class="hint">(defaults to boat seats)</span></label><input id="tr-seats" type="number" min="1" value="${src.seatLimit||''}"></div>
         </div>
         <div class="field"><label>Staff on this trip</label>
@@ -3734,14 +3882,14 @@ window.Posting = Posting;
           <select id="tr-status">${['OPEN','FULL','CLOSED','COMPLETED','CANCELLED'].map(s=>`<option value="${s}" ${src.status===s?'selected':''}>${s}</option>`).join('')}</select>
         </div>
       `,
-      footerHtml: `<button class="btn" data-close>Cancel</button><button class="btn btn-primary" id="tr-save">Save trip</button>`,
+      footerHtml: `<button class="btn" data-close>Cancel</button><button class="btn btn-primary" id="tr-save">Save ${esc(T('trip'))}</button>`,
       onMount(modal){
         qsa('#tr-staff .pill', modal).forEach(p=>p.addEventListener('click', ()=>p.classList.toggle('active')));
         qsa('#tr-pkgs .pill', modal).forEach(p=>p.addEventListener('click', ()=>p.classList.toggle('active')));
         qs('#tr-save', modal).addEventListener('click', ()=>{
           const tripDate = qs('#tr-date', modal).value;
           const boatId = qs('#tr-boat', modal).value;
-          if(!tripDate || !boatId){ toast('Pick a date and boat.', 'err'); return; }
+          if(!tripDate || !boatId){ toast('Pick a date and '+T('boat')+'.', 'err'); return; }
           const boat = Store.find('boats', boatId);
           const staffIds = qsa('#tr-staff .pill.active', modal).map(p=>p.dataset.id);
           const packageIds = qsa('#tr-pkgs .pill.active', modal).map(p=>p.dataset.id);
@@ -3752,7 +3900,7 @@ window.Posting = Posting;
           };
           if(existing && existing.id) Store.update('trips', existing.id, data);
           else Store.insert('trips', Object.assign({ tripNo: Store.docNo('TRP','trip') }, data));
-          closeModal(); toast('Trip saved', 'ok'); Router.render();
+          closeModal(); toast(T('Trip')+' saved', 'ok'); Router.render();
         });
       }
     });
@@ -3762,10 +3910,10 @@ window.Posting = Posting;
   function renderTemplates(){
     const templates = Store.all('tripTemplates');
     qs('#cal-body').innerHTML = `
-      <div class="help-box mb-16">Templates are a shortcut for recurring departures. Generating trips from one just creates ordinary trips you can still edit individually.</div>
+      <div class="help-box mb-16">Templates are a shortcut for recurring departures. Generating ${esc(T('trips'))} from one just creates ordinary ${esc(T('trips'))} you can still edit individually.</div>
       <div class="toolbar"><div class="spacer"></div>${Auth.isViewOnly()?'':'<button class="btn btn-primary" id="tmpl-add">+ Add template</button>'}</div>
       <div class="table-wrap"><table class="t">
-        <thead><tr><th>Name</th><th>Weekdays</th><th>Time</th><th>Boat</th><th></th></tr></thead>
+        <thead><tr><th>Name</th><th>Weekdays</th><th>Time</th><th>${esc(T('Boat'))}</th><th></th></tr></thead>
         <tbody>
         ${templates.length ? templates.map(t=>{
           const boat = Store.find('boats', t.boatId);
@@ -5224,7 +5372,7 @@ window.Posting = Posting;
   }
 
   function render(params){
-    setPageTitle('Trip manifest', 'Bookings');
+    setPageTitle(T('Manifest'), 'Bookings');
     renderNav();
     // Default filter is always today's date — the manifest is a day-of-ops
     // screen, so it should never silently land on some other day's trips.
@@ -5322,6 +5470,524 @@ window.Posting = Posting;
 
   Router.on('/manifest', render);
   window.ManifestModule = { refresh };
+})();
+
+
+/* ---- modules/rooms.js ---- */
+/* ---------------------------------------------------------------------
+   rooms.js — Guesthouse catalog: room types (the rate card) and the
+   actual numbered rooms against them. This is the Guesthouse's
+   equivalent of equipment.js + fleet.js for a Dive/Excursion Centre —
+   reservations.js is what books against these.
+--------------------------------------------------------------------- */
+
+(function(){
+
+  function roomStatusBadge(status){
+    const map = {
+      VACANT_CLEAN: '<span class="badge badge-green">Vacant — clean</span>',
+      VACANT_DIRTY: '<span class="badge badge-amber">Vacant — needs cleaning</span>',
+      OCCUPIED: '<span class="badge badge-teal">Occupied</span>',
+      OUT_OF_SERVICE: '<span class="badge badge-gray">Out of service</span>',
+    };
+    return map[status] || '<span class="badge badge-gray">—</span>';
+  }
+
+  function render(params){
+    setPageTitle('Rooms & rates', 'Catalog');
+    renderNav();
+    const tab = params.sub || 'rooms';
+    qs('#content').innerHTML = `
+      <div class="tabs">
+        <div class="tab ${tab==='rooms'?'active':''}" data-tab="rooms">Rooms</div>
+        <div class="tab ${tab==='types'?'active':''}" data-tab="types">Room types</div>
+      </div>
+      <div id="rm-body"></div>
+    `;
+    qsa('[data-tab]').forEach(t=>t.addEventListener('click', ()=>Router.navigate('rooms/x/'+t.dataset.tab)));
+    if(tab==='types') renderTypes(); else renderRooms();
+  }
+
+  function renderTypes(){
+    const types = Store.all('roomTypes').slice().sort((a,b)=>a.name.localeCompare(b.name));
+    const vo = Auth.isViewOnly();
+    qs('#rm-body').innerHTML = `
+      <div class="toolbar"><div class="spacer"></div>${vo?'':`<button class="btn btn-primary" id="rt-add">+ Add room type</button>`}</div>
+      <div class="table-wrap"><table class="t">
+        <thead><tr><th>Type</th><th>Nightly rate</th><th>Max occupancy</th><th>Rooms</th><th>Status</th><th></th></tr></thead>
+        <tbody>
+        ${types.length ? types.map(t=>{
+          const count = Store.where('rooms', r=>r.roomTypeId===t.id).length;
+          return `<tr><td><strong>${esc(t.name)}</strong></td><td class="num">${fmtMoney(t.nightlyRate)}</td><td>${t.maxOccupancy||1}</td><td>${count}</td>
+            <td>${t.active===false?'<span class="badge badge-gray">Inactive</span>':'<span class="badge badge-green">Active</span>'}</td>
+            <td class="row-actions">
+              ${vo?'':`<button class="btn btn-sm" data-edit-type="${t.id}">Edit</button>
+              ${count===0 ? `<button class="btn btn-sm btn-ghost" data-del-type="${t.id}">Delete</button>`
+                          : `<button class="btn btn-sm btn-ghost" data-toggle-type="${t.id}">${t.active===false?'Reactivate':'Deactivate'}</button>`}`}
+            </td></tr>`;
+        }).join('') : `<tr><td colspan="6" class="table-empty">No room types yet. Start here — e.g. Standard, Deluxe, Family Suite.</td></tr>`}
+        </tbody>
+      </table></div>
+    `;
+    if(qs('#rt-add')) qs('#rt-add').addEventListener('click', ()=>openTypeForm());
+    qsa('[data-edit-type]').forEach(b=>b.addEventListener('click', ()=>openTypeForm(Store.find('roomTypes', b.dataset.editType))));
+    qsa('[data-del-type]').forEach(b=>b.addEventListener('click', ()=>{ Store.remove('roomTypes', b.dataset.delType); toast('Room type deleted'); renderTypes(); }));
+    qsa('[data-toggle-type]').forEach(b=>b.addEventListener('click', ()=>{
+      const t = Store.find('roomTypes', b.dataset.toggleType);
+      Store.update('roomTypes', t.id, { active: t.active===false });
+      renderTypes();
+    }));
+  }
+
+  function openTypeForm(existing){
+    openModal({
+      title: existing ? 'Edit room type' : 'Add room type',
+      bodyHtml: `
+        <div class="field"><label>Type name</label><input id="rtf-name" type="text" placeholder="e.g. Standard, Deluxe, Family Suite" value="${esc(existing?existing.name:'')}"></div>
+        <div class="form-row">
+          <div class="field"><label>Nightly rate</label><input id="rtf-rate" type="number" min="0" step="0.01" value="${existing?existing.nightlyRate:''}"></div>
+          <div class="field"><label>Max occupancy</label><input id="rtf-occ" type="number" min="1" value="${existing?existing.maxOccupancy||1:1}"></div>
+        </div>
+      `,
+      footerHtml: `<button class="btn" data-close>Cancel</button><button class="btn btn-primary" id="rtf-save">Save</button>`,
+      onMount(){
+        qs('#rtf-save').addEventListener('click', ()=>{
+          const name = qs('#rtf-name').value.trim();
+          if(!name){ toast('Enter a type name.', 'err'); return; }
+          const data = { name, nightlyRate: parseFloat(qs('#rtf-rate').value)||0, maxOccupancy: parseInt(qs('#rtf-occ').value)||1, active:true };
+          if(existing) Store.update('roomTypes', existing.id, data);
+          else Store.insert('roomTypes', data);
+          closeModal(); toast('Room type saved', 'ok'); renderTypes();
+        });
+      }
+    });
+  }
+
+  function renderRooms(){
+    const types = Store.all('roomTypes');
+    const rooms = Store.all('rooms').slice().sort((a,b)=>(a.number||'').localeCompare(b.number||'', undefined, {numeric:true}));
+    const vo = Auth.isViewOnly();
+    qs('#rm-body').innerHTML = `
+      <div class="toolbar">
+        <div class="spacer"></div>
+        ${vo?'': types.length ? `<button class="btn btn-primary" id="rm-add">+ Add room</button>` : `<span class="muted small">Add a room type first.</span>`}
+      </div>
+      <div class="table-wrap"><table class="t">
+        <thead><tr><th>Room</th><th>Type</th><th>Status</th><th>Notes</th><th></th></tr></thead>
+        <tbody>
+        ${rooms.length ? rooms.map(r=>{
+          const t = Store.find('roomTypes', r.roomTypeId);
+          return `<tr><td><strong>${esc(r.number)}</strong>${r.name?' — '+esc(r.name):''}</td><td>${esc(t?t.name:'—')}</td>
+            <td>${roomStatusBadge(r.status)}</td><td class="small muted">${esc(r.notes||'')}</td>
+            <td class="row-actions">
+              ${vo?'':`<button class="btn btn-sm" data-edit-room="${r.id}">Edit</button>
+              ${r.status==='VACANT_DIRTY'?`<button class="btn btn-sm btn-ghost" data-mark-clean="${r.id}">Mark clean</button>`:''}
+              ${r.status==='OUT_OF_SERVICE'?`<button class="btn btn-sm btn-ghost" data-mark-instock="${r.id}">Return to service</button>`:`<button class="btn btn-sm btn-ghost" data-mark-oos="${r.id}">Out of service</button>`}`}
+            </td></tr>`;
+        }).join('') : `<tr><td colspan="5" class="table-empty">No rooms yet.</td></tr>`}
+        </tbody>
+      </table></div>
+    `;
+    if(qs('#rm-add')) qs('#rm-add').addEventListener('click', ()=>openRoomForm());
+    qsa('[data-edit-room]').forEach(b=>b.addEventListener('click', ()=>openRoomForm(Store.find('rooms', b.dataset.editRoom))));
+    qsa('[data-mark-clean]').forEach(b=>b.addEventListener('click', ()=>{ Store.update('rooms', b.dataset.markClean, { status:'VACANT_CLEAN' }); renderRooms(); }));
+    qsa('[data-mark-oos]').forEach(b=>b.addEventListener('click', ()=>{ Store.update('rooms', b.dataset.markOos, { status:'OUT_OF_SERVICE' }); renderRooms(); }));
+    qsa('[data-mark-instock]').forEach(b=>b.addEventListener('click', ()=>{ Store.update('rooms', b.dataset.markInstock, { status:'VACANT_CLEAN' }); renderRooms(); }));
+  }
+
+  function openRoomForm(existing){
+    const types = Store.all('roomTypes').filter(t=>t.active!==false);
+    openModal({
+      title: existing ? 'Edit room' : 'Add room',
+      bodyHtml: `
+        <div class="form-row">
+          <div class="field"><label>Room number</label><input id="rmf-number" type="text" placeholder="e.g. 101" value="${esc(existing?existing.number:'')}"></div>
+          <div class="field"><label>Name <span class="hint">(optional)</span></label><input id="rmf-name" type="text" placeholder="e.g. Garden View" value="${esc(existing?existing.name||'':'')}"></div>
+        </div>
+        <div class="field"><label>Room type</label><select id="rmf-type">${types.map(t=>`<option value="${t.id}" ${existing&&existing.roomTypeId===t.id?'selected':''}>${esc(t.name)}</option>`).join('')}</select></div>
+        <div class="field"><label>Notes</label><textarea id="rmf-notes">${esc(existing?existing.notes||'':'')}</textarea></div>
+      `,
+      footerHtml: `<button class="btn" data-close>Cancel</button><button class="btn btn-primary" id="rmf-save">Save</button>`,
+      onMount(){
+        qs('#rmf-save').addEventListener('click', ()=>{
+          const number = qs('#rmf-number').value.trim();
+          const roomTypeId = qs('#rmf-type').value;
+          if(!number){ toast('Enter a room number.', 'err'); return; }
+          if(!roomTypeId){ toast('Add a room type first.', 'err'); return; }
+          const data = { number, name: qs('#rmf-name').value.trim(), roomTypeId, notes: qs('#rmf-notes').value.trim() };
+          if(existing) Store.update('rooms', existing.id, data);
+          else Store.insert('rooms', Object.assign({ status:'VACANT_CLEAN' }, data));
+          closeModal(); toast('Room saved', 'ok'); renderRooms();
+        });
+      }
+    });
+  }
+
+  Router.on('/rooms', render);
+  window.RoomsModule = { roomStatusBadge };
+})();
+
+
+/* ---- modules/reservations.js ---- */
+/* ---------------------------------------------------------------------
+   reservations.js — Guesthouse room/night bookings: create a reservation
+   against an available room for a date range, check the guest in, add
+   any extra charges during the stay, check out (which finalizes and
+   posts the folio invoice), then collect payment. This is the
+   Guesthouse's equivalent of calendar.js + bookings.js + manifest.js for
+   a Dive/Excursion Centre — it is a genuinely different booking shape
+   (date-range stays on a room, not single-date trips on a boat), so it
+   is its own module rather than a relabeled trip.
+
+   A reservation's nights/rate are fixed at creation and don't
+   auto-adjust for an early/late actual check-out — a known v1
+   simplification; the front desk can still edit extras any time before
+   check-out finalizes the folio.
+--------------------------------------------------------------------- */
+
+(function(){
+
+  function statusBadge(status){
+    const map = {
+      CONFIRMED: '<span class="badge badge-teal">Confirmed</span>',
+      CHECKED_IN: '<span class="badge badge-green">Checked in</span>',
+      CHECKED_OUT: '<span class="badge badge-gray">Checked out</span>',
+      CANCELLED: '<span class="badge badge-red">Cancelled</span>',
+      NO_SHOW: '<span class="badge badge-amber">No-show</span>',
+    };
+    return map[status] || '<span class="badge badge-gray">—</span>';
+  }
+
+  function nightsBetween(checkIn, checkOut){
+    const a = new Date(checkIn+'T00:00:00'), b = new Date(checkOut+'T00:00:00');
+    const n = Math.round((b-a)/86400000);
+    return n>0 ? n : 1;
+  }
+
+  // A room is free for [checkIn, checkOut) if no other active reservation
+  // on it overlaps that range (half-open interval: a checkout day is free
+  // for a new check-in the same day).
+  function roomIsFree(roomId, checkIn, checkOut, excludeResId){
+    return !Store.all('reservations').some(r=>
+      r.id!==excludeResId && r.roomId===roomId &&
+      !['CANCELLED','NO_SHOW'].includes(r.status) &&
+      checkIn < r.checkOut && r.checkIn < checkOut
+    );
+  }
+
+  function availableRooms(roomTypeId, checkIn, checkOut, excludeResId){
+    return Store.where('rooms', r=>r.roomTypeId===roomTypeId).filter(r=>roomIsFree(r.id, checkIn, checkOut, excludeResId));
+  }
+
+  function balanceInfo(res){
+    const paid = Ledger.round2(Store.where('receipts', r=>r.reservationId===res.id).reduce((s,r)=>s+(r.amount||0),0));
+    const total = res.invoiceTotal || 0;
+    return { total, paid, balance: Ledger.round2(total-paid) };
+  }
+
+  /* ---------------- LIST ---------------- */
+  function render(params){
+    if(params.id) return detail(params);
+    setPageTitle('Reservations', 'Bookings');
+    renderNav();
+    const reservations = Store.all('reservations').slice().sort((a,b)=>(b.createdAt||'').localeCompare(a.createdAt||''));
+    const vo = Auth.isViewOnly();
+    qs('#content').innerHTML = `
+      <div class="toolbar"><div class="spacer"></div>${vo?'':`<button class="btn btn-primary" id="res-add">+ New reservation</button>`}</div>
+      <div class="table-wrap"><table class="t">
+        <thead><tr><th>Reservation</th><th>Guest</th><th>Room</th><th>Check-in</th><th>Check-out</th><th>Nights</th><th>Status</th><th></th></tr></thead>
+        <tbody>
+        ${reservations.length ? reservations.map(r=>{
+          const guest = Store.find('guests', r.guestId);
+          const room = Store.find('rooms', r.roomId);
+          return `<tr><td class="mono">${esc(r.reservationNo)}</td><td>${esc(guest?guest.name:'—')}</td><td>${esc(room?room.number:'—')}</td>
+            <td>${fmtDate(r.checkIn)}</td><td>${fmtDate(r.checkOut)}</td><td>${r.nights}</td><td>${statusBadge(r.status)}</td>
+            <td class="row-actions"><button class="btn btn-sm" data-view="${r.id}">Open</button></td></tr>`;
+        }).join('') : `<tr><td colspan="8" class="table-empty">No reservations yet.</td></tr>`}
+        </tbody>
+      </table></div>
+    `;
+    if(qs('#res-add')) qs('#res-add').addEventListener('click', ()=>openReservationForm());
+    qsa('[data-view]').forEach(b=>b.addEventListener('click', ()=>Router.navigate('reservations/'+b.dataset.view)));
+  }
+
+  function openReservationForm(){
+    const customers = Store.all('customers').filter(c=>c.active!==false);
+    const guests = Store.all('guests');
+    const roomTypes = Store.all('roomTypes').filter(t=>t.active!==false);
+    if(!roomTypes.length){ toast('Add a room type first, under Catalog → Rooms & rates.', 'err'); return; }
+    openModal({
+      title:'New reservation', size:'lg',
+      bodyHtml: `
+        <div class="form-row">
+          <div class="field"><label>Customer</label><select id="rf-customer">${customers.map(c=>`<option value="${c.id}" ${c.id==='CUST_DIRECT'?'selected':''}>${esc(c.name)}</option>`).join('')}</select></div>
+          <div class="field"><label>Guest</label>
+            <select id="rf-guest"><option value="">Select…</option>${guests.map(g=>`<option value="${g.id}">${esc(g.name)}</option>`).join('')}</select>
+          </div>
+        </div>
+        <div class="field"><label>New guest name <span class="hint">(if not listed above)</span></label><input id="rf-newguest" type="text"></div>
+        <div class="form-row">
+          <div class="field"><label>Check-in</label><input id="rf-checkin" type="date" value="${todayISO()}"></div>
+          <div class="field"><label>Check-out</label><input id="rf-checkout" type="date" value="${todayISO()}"></div>
+        </div>
+        <div class="field"><label>Room type</label><select id="rf-type">${roomTypes.map(t=>`<option value="${t.id}">${esc(t.name)} (${fmtMoney(t.nightlyRate)}/night)</option>`).join('')}</select></div>
+        <div class="field"><label>Room</label><select id="rf-room"></select></div>
+        <div class="field"><label>Rate (per night)</label><input id="rf-rate" type="number" min="0" step="0.01"></div>
+        <p class="hint" id="rf-avail"></p>
+      `,
+      footerHtml: `<button class="btn" data-close>Cancel</button><button class="btn btn-primary" id="rf-save">Create reservation</button>`,
+      onMount(modal){
+        const typeSel = qs('#rf-type', modal), roomSel = qs('#rf-room', modal), rateInp = qs('#rf-rate', modal);
+        const ciInp = qs('#rf-checkin', modal), coInp = qs('#rf-checkout', modal), availNote = qs('#rf-avail', modal);
+        function refreshRooms(){
+          const type = Store.find('roomTypes', typeSel.value);
+          rateInp.value = type ? type.nightlyRate : 0;
+          const checkIn = ciInp.value, checkOut = coInp.value;
+          if(!checkIn || !checkOut || checkOut<=checkIn){ roomSel.innerHTML = ''; availNote.textContent = 'Check-out must be after check-in.'; return; }
+          const rooms = availableRooms(typeSel.value, checkIn, checkOut, null);
+          roomSel.innerHTML = rooms.map(r=>`<option value="${r.id}">${esc(r.number)}${r.name?' — '+esc(r.name):''}</option>`).join('');
+          availNote.textContent = rooms.length ? `${rooms.length} room(s) of this type free for these dates.` : 'No rooms of this type are free for these dates.';
+        }
+        typeSel.addEventListener('change', refreshRooms);
+        ciInp.addEventListener('change', refreshRooms);
+        coInp.addEventListener('change', refreshRooms);
+        refreshRooms();
+        qs('#rf-save', modal).addEventListener('click', ()=>{
+          const checkIn = ciInp.value, checkOut = coInp.value;
+          if(!checkIn || !checkOut || checkOut<=checkIn){ toast('Pick a valid check-in/check-out range.', 'err'); return; }
+          const roomId = roomSel.value;
+          if(!roomId){ toast('No room available for that type/date range.', 'err'); return; }
+          let guestId = qs('#rf-guest', modal).value;
+          const newGuestName = qs('#rf-newguest', modal).value.trim();
+          if(!guestId && newGuestName) guestId = Store.insert('guests', { name:newGuestName }).id;
+          if(!guestId){ toast('Pick or add a guest.', 'err'); return; }
+          const rate = parseFloat(rateInp.value)||0;
+          const nights = nightsBetween(checkIn, checkOut);
+          const res = Store.insert('reservations', {
+            reservationNo: Store.docNo('RES','reservation'),
+            customerId: qs('#rf-customer', modal).value, guestId,
+            roomTypeId: typeSel.value, roomId,
+            checkIn, checkOut, nights, rate, extras: [],
+            status:'CONFIRMED'
+          });
+          closeModal(); toast('Reservation created', 'ok'); Router.navigate('reservations/'+res.id);
+        });
+      }
+    });
+  }
+
+  /* ---------------- DETAIL ---------------- */
+  function detail(params){
+    const res = Store.find('reservations', params.id);
+    if(!res){ setPageTitle('Reservation', 'Bookings'); qs('#content').innerHTML = `<div class="empty-state card"><h3>Reservation not found</h3></div>`; return; }
+    setPageTitle(res.reservationNo, 'Bookings');
+    renderNav();
+    const guest = Store.find('guests', res.guestId);
+    const customer = Store.find('customers', res.customerId);
+    const room = Store.find('rooms', res.roomId);
+    const roomType = Store.find('roomTypes', res.roomTypeId);
+    const vo = Auth.isViewOnly();
+    const invoiced = !!res.invoiceJournalId;
+    const roomTotal = Ledger.round2((res.rate||0)*(res.nights||0));
+    const extrasTotal = Ledger.round2((res.extras||[]).reduce((s,e)=>s+(e.amount||0),0));
+    const info = invoiced ? balanceInfo(res) : null;
+    const receipts = invoiced ? Store.where('receipts', r=>r.reservationId===res.id) : [];
+
+    qs('#content').innerHTML = `
+      <div class="card mb-16">
+        <div class="grid grid-4">
+          <div><div class="small muted">Guest</div><div><strong>${esc(guest?guest.name:'—')}</strong></div></div>
+          <div><div class="small muted">Customer</div><div><strong>${esc(customer?customer.name:'—')}</strong></div></div>
+          <div><div class="small muted">Room</div><div><strong>${esc(room?room.number:'—')} (${esc(roomType?roomType.name:'—')})</strong></div></div>
+          <div><div class="small muted">Status</div><div>${statusBadge(res.status)}</div></div>
+        </div>
+        <div class="grid grid-4 mt-12">
+          <div><div class="small muted">Check-in</div><div>${fmtDate(res.checkIn)}</div></div>
+          <div><div class="small muted">Check-out</div><div>${fmtDate(res.checkOut)}</div></div>
+          <div><div class="small muted">Nights</div><div>${res.nights}</div></div>
+          <div><div class="small muted">Rate / night</div><div>${fmtMoney(res.rate)}</div></div>
+        </div>
+      </div>
+
+      <div class="card mb-16">
+        <div class="card-head"><h2>Folio</h2>${(!invoiced && res.status==='CHECKED_IN' && !vo)?`<button class="btn btn-sm" id="res-add-extra">+ Add extra charge</button>`:''}</div>
+        <div class="table-wrap"><table class="t">
+          <thead><tr><th>Item</th><th class="num">Amount</th></tr></thead>
+          <tbody>
+            <tr><td>Room — ${res.nights} night(s) × ${fmtMoney(res.rate)}</td><td class="num">${fmtMoney(roomTotal)}</td></tr>
+            ${(res.extras||[]).map(e=>`<tr><td>${esc(e.description)}</td><td class="num">${fmtMoney(e.amount)}</td></tr>`).join('')}
+            ${invoiced ? `
+              <tr><td>Subtotal</td><td class="num">${fmtMoney(res.invoiceSub)}</td></tr>
+              <tr><td>Tax</td><td class="num">${fmtMoney(res.invoiceTax)}</td></tr>
+              <tr class="report-total"><td>Total</td><td class="num">${fmtMoney(res.invoiceTotal)}</td></tr>
+            ` : `<tr class="report-subtotal"><td>Estimated total (not yet invoiced)</td><td class="num">${fmtMoney(Ledger.round2(roomTotal+extrasTotal))}</td></tr>`}
+          </tbody>
+        </table></div>
+      </div>
+
+      ${invoiced ? `
+      <div class="card mb-16">
+        <div class="card-head"><h2>Payments</h2></div>
+        <div class="table-wrap"><table class="t">
+          <thead><tr><th>Receipt #</th><th>Date</th><th>Method</th><th class="num">Amount</th></tr></thead>
+          <tbody>
+          ${receipts.length ? receipts.map(r=>`<tr><td>${esc(r.receiptNo)}</td><td>${fmtDate(r.date)}</td><td>${esc(CashModule.methodLabel(r.method))}</td><td class="num">${fmtMoney(r.amount)}</td></tr>`).join('')
+            : `<tr><td colspan="4" class="table-empty">No payments recorded yet.</td></tr>`}
+          </tbody>
+        </table></div>
+        <div class="mt-12"><strong>Balance due: ${fmtMoney(info.balance)}</strong></div>
+      </div>` : ''}
+
+      ${vo?'':`<div class="flex-gap wrap">
+        ${res.status==='CONFIRMED' ? `<button class="btn btn-primary" id="res-checkin">Check in</button>
+          <button class="btn btn-danger" id="res-cancel">Cancel reservation</button>
+          <button class="btn btn-ghost" id="res-noshow">Mark no-show</button>` : ''}
+        ${res.status==='CHECKED_IN' && !invoiced ? `<button class="btn btn-primary" id="res-checkout">Check out &amp; invoice</button>` : ''}
+        ${invoiced && info.balance>0.004 ? `<button class="btn btn-primary" id="res-collect">Collect payment</button>` : ''}
+      </div>`}
+    `;
+
+    if(qs('#res-add-extra')) qs('#res-add-extra').addEventListener('click', ()=>openAddExtraForm(res));
+    if(qs('#res-checkin')) qs('#res-checkin').addEventListener('click', ()=>{
+      Store.update('rooms', res.roomId, { status:'OCCUPIED' });
+      Store.update('reservations', res.id, { status:'CHECKED_IN' });
+      toast('Guest checked in', 'ok'); detail(params);
+    });
+    if(qs('#res-checkout')) qs('#res-checkout').addEventListener('click', ()=>{
+      try{ Posting.postReservationInvoice(Store.find('reservations', res.id)); }
+      catch(e){ toast(e.message, 'err'); return; }
+      Store.update('rooms', res.roomId, { status:'VACANT_DIRTY' });
+      Store.update('reservations', res.id, { status:'CHECKED_OUT' });
+      toast('Checked out — folio invoiced', 'ok'); detail(params);
+    });
+    if(qs('#res-cancel')) qs('#res-cancel').addEventListener('click', ()=>{
+      confirmDialog('Cancel this reservation?', ()=>{
+        Store.update('reservations', res.id, { status:'CANCELLED' });
+        closeModal(); toast('Reservation cancelled'); detail(params);
+      }, {danger:true, yesLabel:'Cancel reservation'});
+    });
+    if(qs('#res-noshow')) qs('#res-noshow').addEventListener('click', ()=>{
+      Store.update('reservations', res.id, { status:'NO_SHOW' });
+      toast('Marked as no-show'); detail(params);
+    });
+    if(qs('#res-collect')) qs('#res-collect').addEventListener('click', ()=>openCollectPaymentForm(res, ()=>detail(params)));
+  }
+
+  function openAddExtraForm(res){
+    openModal({
+      title:'Add extra charge',
+      bodyHtml: `
+        <div class="field"><label>Description</label><input id="ef-desc" type="text" placeholder="e.g. Minibar, Laundry, Airport transfer"></div>
+        <div class="field"><label>Amount</label><input id="ef-amount" type="number" min="0.01" step="0.01"></div>
+      `,
+      footerHtml: `<button class="btn" data-close>Cancel</button><button class="btn btn-primary" id="ef-save">Add</button>`,
+      onMount(modal){
+        qs('#ef-save', modal).addEventListener('click', ()=>{
+          const description = qs('#ef-desc', modal).value.trim();
+          const amount = parseFloat(qs('#ef-amount', modal).value);
+          if(!description || !amount || amount<=0){ toast('Enter a description and amount.', 'err'); return; }
+          const extras = (res.extras||[]).slice();
+          extras.push({ id: Store.uid('ex'), description, amount: Ledger.round2(amount) });
+          Store.update('reservations', res.id, { extras });
+          closeModal(); toast('Extra charge added', 'ok'); detail({id:res.id});
+        });
+      }
+    });
+  }
+
+  function openCollectPaymentForm(res, onSaved){
+    const info = balanceInfo(res);
+    if(info.balance<=0.004){ toast('This reservation has no balance due.', 'err'); return; }
+    const methods = Store.settings.paymentMethods||[];
+    openModal({
+      title:'Collect payment',
+      bodyHtml: `
+        <dl class="kv mb-16">
+          <dt>Reservation</dt><dd>${esc(res.reservationNo)}</dd>
+          <dt>Balance due</dt><dd>${fmtMoney(info.balance)}</dd>
+        </dl>
+        <div class="form-row">
+          <div class="field"><label>Settle via</label><select id="rcp-method">${methods.map(m=>`<option value="${m.id}">${esc(m.label)}</option>`).join('')}</select></div>
+          <div class="field"><label>Date</label><input id="rcp-date" type="date" value="${todayISO()}"></div>
+        </div>
+        <div class="field"><label>Amount</label><input id="rcp-amount" type="number" min="0.01" step="0.01" value="${info.balance.toFixed(2)}"></div>
+      `,
+      footerHtml: `<button class="btn" data-close>Cancel</button><button class="btn btn-primary" id="rcp-save">Record payment</button>`,
+      onMount(modal){
+        qs('#rcp-save', modal).addEventListener('click', ()=>{
+          const amount = parseFloat(qs('#rcp-amount', modal).value);
+          if(!amount || amount<=0){ toast('Enter an amount.', 'err'); return; }
+          if(amount > info.balance+0.01){ toast('Amount cannot exceed the balance due.', 'err'); return; }
+          const receipt = { receiptNo: Store.docNo('RCT','receipt'), customerId: res.customerId, reservationId: res.id,
+            date: qs('#rcp-date', modal).value||todayISO(), method: qs('#rcp-method', modal).value,
+            currency: Pricing.baseCurrency(), amount: Ledger.round2(amount) };
+          Store.insert('receipts', receipt);
+          try{ Posting.postReceipt(receipt); }
+          catch(e){ toast(e.message, 'err'); return; }
+          closeModal(); toast('Payment recorded', 'ok'); if(onSaved) onSaved();
+        });
+      }
+    });
+  }
+
+  /* ---------------- FRONT DESK BOARD ---------------- */
+  function renderFrontDesk(){
+    setPageTitle('Front desk', 'Bookings');
+    renderNav();
+    const today = todayISO();
+    const all = Store.all('reservations');
+    const arrivals = all.filter(r=>r.checkIn===today && r.status==='CONFIRMED');
+    const departures = all.filter(r=>r.checkOut===today && r.status==='CHECKED_IN');
+    const inHouse = all.filter(r=>r.status==='CHECKED_IN');
+    const rooms = Store.all('rooms').slice().sort((a,b)=>(a.number||'').localeCompare(b.number||'', undefined, {numeric:true}));
+
+    function resRow(r){
+      const guest = Store.find('guests', r.guestId);
+      const room = Store.find('rooms', r.roomId);
+      return `<tr><td class="mono">${esc(r.reservationNo)}</td><td>${esc(guest?guest.name:'—')}</td><td>${esc(room?room.number:'—')}</td>
+        <td class="row-actions"><button class="btn btn-sm" data-goto="${r.id}">Open</button></td></tr>`;
+    }
+
+    qs('#content').innerHTML = `
+      <div class="grid grid-2">
+        <div class="card">
+          <div class="card-head"><h2>Arrivals today</h2><span class="sub">${fmtDate(today)}</span></div>
+          <div class="table-wrap"><table class="t"><tbody>
+            ${arrivals.length ? arrivals.map(resRow).join('') : `<tr><td class="table-empty">No arrivals today.</td></tr>`}
+          </tbody></table></div>
+        </div>
+        <div class="card">
+          <div class="card-head"><h2>Departures today</h2><span class="sub">${fmtDate(today)}</span></div>
+          <div class="table-wrap"><table class="t"><tbody>
+            ${departures.length ? departures.map(resRow).join('') : `<tr><td class="table-empty">No departures today.</td></tr>`}
+          </tbody></table></div>
+        </div>
+      </div>
+      <div class="card mt-16">
+        <div class="card-head"><h2>In-house</h2></div>
+        <div class="table-wrap"><table class="t"><tbody>
+          ${inHouse.length ? inHouse.map(resRow).join('') : `<tr><td class="table-empty">No guests currently in-house.</td></tr>`}
+        </tbody></table></div>
+      </div>
+      <div class="card mt-16">
+        <div class="card-head"><h2>Room status</h2></div>
+        <div class="table-wrap"><table class="t">
+          <thead><tr><th>Room</th><th>Type</th><th>Status</th></tr></thead>
+          <tbody>
+          ${rooms.length ? rooms.map(r=>{
+            const t = Store.find('roomTypes', r.roomTypeId);
+            return `<tr><td>${esc(r.number)}</td><td>${esc(t?t.name:'—')}</td><td>${RoomsModule.roomStatusBadge(r.status)}</td></tr>`;
+          }).join('') : `<tr><td colspan="3" class="table-empty">No rooms set up yet.</td></tr>`}
+          </tbody>
+        </table></div>
+      </div>
+    `;
+    qsa('[data-goto]').forEach(b=>b.addEventListener('click', ()=>Router.navigate('reservations/'+b.dataset.goto)));
+  }
+
+  Router.on('/reservations', render);
+  Router.on('/frontdesk', renderFrontDesk);
+  window.ReservationsModule = { openCollectPaymentForm, balanceInfo };
 })();
 
 
@@ -9265,26 +9931,33 @@ function icon(name, size){
    here needs the module bundle to change per edition. */
 const EDITION = (typeof window!=='undefined' && window.APP_EDITION) || 'full';
 
+// biz: which business-type vertical(s) a nav item applies to — undefined
+// means every vertical. TRIP_BASED = Dive Centre & Excursion Centre (same
+// booking engine, relabeled via T()); ROOM_BASED = Guesthouse (its own
+// rooms/reservations modules). See businesstype.js.
 const NAV = [
   { group:'', items:[ {path:'/dashboard', label:'Dashboard', icon:'home', ed:'all'} ] },
   { group:'Bookings', icon:'bookings', items:[
-    {path:'/calendar', label:'Calendar', ed:'front'},
-    {path:'/bookings', label:'Bookings', ed:'front'},
-    {path:'/invoices', label:'Sales invoices', ed:'front'},
-    {path:'/manifest', label:'Trip manifest', ed:'front'},
-    {path:'/kiosk', label:'Kiosk (waiver)', ed:'front'},
+    {path:'/calendar', label:'Calendar', ed:'front', biz:'TRIP_BASED'},
+    {path:'/bookings', label:'Bookings', ed:'front', biz:'TRIP_BASED'},
+    {path:'/invoices', label:'Sales invoices', ed:'front', biz:'TRIP_BASED'},
+    {path:'/manifest', label:'Trip manifest', ed:'front', biz:'TRIP_BASED'},
+    {path:'/kiosk', label:'Kiosk (waiver)', ed:'front', biz:'TRIP_BASED'},
+    {path:'/frontdesk', label:'Front desk', ed:'front', biz:'ROOM_BASED'},
+    {path:'/reservations', label:'Reservations', ed:'front', biz:'ROOM_BASED'},
   ]},
   { group:'Directory', icon:'directory', items:[
     {path:'/customers', label:'Customers (agents)', ed:'front'},
     {path:'/guests', label:'Guests', ed:'front'},
     {path:'/vendors', label:'Vendors', ed:'back'},
-    {path:'/waivers', label:'Waiver templates', ed:'front'},
+    {path:'/waivers', label:'Waiver templates', ed:'front', biz:'TRIP_BASED'},
   ]},
   { group:'Catalog', icon:'catalog', items:[
-    {path:'/packages', label:'Packages & kits', ed:'front'},
-    {path:'/pricelists', label:'Price lists', ed:'front'},
-    {path:'/equipment', label:'Equipment', ed:'front'},
-    {path:'/fleet', label:'Boats & staff', ed:'front'},
+    {path:'/packages', label:'Packages & kits', ed:'front', biz:'TRIP_BASED'},
+    {path:'/pricelists', label:'Price lists', ed:'front', biz:'TRIP_BASED'},
+    {path:'/equipment', label:'Equipment', ed:'front', biz:'TRIP_BASED'},
+    {path:'/fleet', label:'Boats & staff', ed:'front', biz:'TRIP_BASED'},
+    {path:'/rooms', label:'Rooms & rates', ed:'front', biz:'ROOM_BASED'},
   ]},
   { group:'Finance', icon:'finance', items:[
     {path:'/receipts', label:'Receipts', ed:'front'},
@@ -9317,15 +9990,22 @@ const REPORT_TAB_EDITION = {
   araging:'back', apaging:'back', vendors:'back', tax:'back',
   customers:'front', trips:'front', equipment:'front',
 };
+// Trip/equipment operational reports only make sense for the trip-based
+// verticals (there's no trips/equipment data for a Guesthouse to report on).
+const REPORT_TAB_BIZ = { trips:'TRIP_BASED', equipment:'TRIP_BASED' };
 
 const EditionGuard = {
   edition(){ return EDITION; },
   isPathAllowed(path){
-    if(EDITION==='full') return true;
-    for(const g of NAV) for(const it of g.items) if(it.path===path) return it.ed==='all' || it.ed===EDITION;
+    for(const g of NAV) for(const it of g.items) if(it.path===path){
+      if(it.biz && it.biz!==BusinessTypes.navKey()) return false;
+      return EDITION==='full' || it.ed==='all' || it.ed===EDITION;
+    }
     return true; // route with no nav entry — don't block
   },
   isReportTabAllowed(tab){
+    const biz = REPORT_TAB_BIZ[tab];
+    if(biz && biz!==BusinessTypes.navKey()) return false;
     if(EDITION==='full') return true;
     const ed = REPORT_TAB_EDITION[tab];
     return !ed || ed===EDITION;
@@ -9333,6 +10013,19 @@ const EditionGuard = {
   firstAllowedPath(){ return '/dashboard'; }, // always 'all' — safe fallback for every edition
 };
 window.EditionGuard = EditionGuard;
+
+// A couple of nav labels borrow business-type terminology (see
+// businesstype.js's T()) rather than being fixed strings — looked up at
+// render time (NAV itself is built before Store is loaded, so it can't
+// call T() at definition time).
+function navLabel(it){
+  if(it.path==='/manifest') return T('Manifest');
+  if(it.path==='/equipment') return T('Equipment');
+  if(it.path==='/fleet') return T('Boats')+' & staff';
+  if(it.path==='/packages') return T('Package')+'s & kits';
+  if(it.path==='/calendar' || it.path==='/bookings') return it.label; // "Calendar"/"Bookings" read fine generically
+  return it.label;
+}
 
 function renderShell(){
   const s = Store.settings;
@@ -9411,13 +10104,13 @@ function renderNav(){
   }
   lastActiveGroupKey = activeGroupKey;
 
-  const visible = (it)=> EDITION==='full' || it.ed==='all' || it.ed===EDITION;
+  const visible = (it)=> (EDITION==='full' || it.ed==='all' || it.ed===EDITION) && (!it.biz || it.biz===BusinessTypes.navKey());
 
   bar.innerHTML = NAV.map((g,gi)=>{
     const items = g.items.filter(visible);
     if(!items.length) return '';
     if(!g.group){
-      return items.map(it=>`<div class="sidebar-link top ${it.path===activeTop?'active':''}" data-nav="${it.path}">${it.icon?icon(it.icon):''}<span>${esc(it.label)}</span></div>`).join('');
+      return items.map(it=>`<div class="sidebar-link top ${it.path===activeTop?'active':''}" data-nav="${it.path}">${it.icon?icon(it.icon):''}<span>${esc(navLabel(it))}</span></div>`).join('');
     }
     const groupActive = g.group===activeGroupKey;
     const expanded = !!navExpandState[g.group];
@@ -9427,7 +10120,7 @@ function renderNav(){
           <span class="group-label">${g.icon?icon(g.icon):''}<span>${esc(g.group)}</span></span><span class="chev">&#9662;</span>
         </button>
         <div class="sidebar-group-items" data-group-panel="${gi}">
-          ${items.map(it=>`<div class="sidebar-link sub ${it.path===activeTop?'active':''}" data-nav="${it.path}">${esc(it.label)}</div>`).join('')}
+          ${items.map(it=>`<div class="sidebar-link sub ${it.path===activeTop?'active':''}" data-nav="${it.path}">${esc(navLabel(it))}</div>`).join('')}
         </div>
       </div>`;
   }).join('');
@@ -9504,13 +10197,43 @@ function needsSetup(){
   return !Store.settings.setupComplete || Store.all('users').length===0;
 }
 
+// Which business type the setup wizard currently has selected — chosen on
+// the wizard's first screen, before the rest of the form (which relabels
+// itself via T() once a type is picked) ever renders.
+let suSelectedBizType = null;
+
+function renderSetupWizardBizStep(){
+  document.body.innerHTML = `
+    <div style="min-height:100vh;display:flex;align-items:center;justify-content:center;background:var(--paper);padding:20px">
+      <div class="card" style="max-width:560px;width:100%">
+        <h1 style="margin-bottom:4px">What kind of business is this?</h1>
+        <p class="muted small mb-16">This decides the setup you get next — the menu, the booking screens, and a starter chart of accounts tailored to it. You can't change this later without a reset, so pick the one that matches what you actually run.</p>
+        <div class="grid" style="gap:10px" id="su-biz-list">
+          ${BusinessTypes.list().map(b=>`
+            <div class="card" data-biz="${b.id}" style="cursor:pointer;padding:14px" >
+              <h3 style="margin-bottom:4px">${esc(b.label)}</h3>
+              <p class="muted small" style="margin:0">${esc(b.blurb)}</p>
+            </div>
+          `).join('')}
+        </div>
+      </div>
+    </div>`;
+  qsa('[data-biz]').forEach(card=>card.addEventListener('click', ()=>{
+    suSelectedBizType = card.dataset.biz;
+    renderSetupWizard();
+  }));
+}
+
 function renderSetupWizard(){
+  if(!suSelectedBizType){ renderSetupWizardBizStep(); return; }
+  const biz = BusinessTypes.get(suSelectedBizType);
   document.body.innerHTML = `
     <div style="min-height:100vh;display:flex;align-items:center;justify-content:center;background:var(--paper);padding:20px">
       <div class="card" style="max-width:480px;width:100%">
-        <h1 style="margin-bottom:4px">Set up your dive centre</h1>
+        <p class="linkbtn mb-8" id="su-back">&larr; Change business type</p>
+        <h1 style="margin-bottom:4px">Set up your ${esc(biz.label.toLowerCase())}</h1>
         <p class="muted small mb-16">This runs entirely in this browser. Nothing is sent anywhere. You can change all of this later in Settings.</p>
-        <div class="field"><label>Company / dive centre name</label><input id="su-name" type="text" placeholder="e.g. Blue Horizon Divers"></div>
+        <div class="field"><label>Company / ${esc(biz.label.toLowerCase())} name</label><input id="su-name" type="text" placeholder="e.g. Blue Horizon ${esc(biz.label)}"></div>
         <div class="form-row">
           <div class="field"><label>Currency code</label><input id="su-cur" type="text" value="USD" maxlength="3" style="text-transform:uppercase"></div>
           <div class="field"><label>Currency symbol</label><input id="su-sym" type="text" value="$" maxlength="3"></div>
@@ -9535,6 +10258,7 @@ function renderSetupWizard(){
         <button class="btn btn-primary btn-block mt-12" id="su-go">Start using the app</button>
       </div>
     </div>`;
+  qs('#su-back').addEventListener('click', ()=>{ suSelectedBizType=null; renderSetupWizard(); });
   qs('#su-go').addEventListener('click', ()=>{
     const name = qs('#su-name').value.trim();
     const userName = qs('#su-user').value.trim();
@@ -9549,6 +10273,7 @@ function renderSetupWizard(){
       defaultTaxRate: parseFloat(qs('#su-tax').value)||0,
       setupComplete: true
     });
+    Store.setBusinessType(suSelectedBizType);
     const user = Store.insert('users', { name:userName, role: qs('#su-role').value, active:true });
     Auth.setPassword(user.id, pw);
     Auth.setCurrentUser(user.id);
