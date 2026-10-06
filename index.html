@@ -588,7 +588,7 @@ const COLLECTIONS = [
   'packages','priceLists','agentPrices',
   'boats','staff','tripTemplates','trips','closures',
   'bookings','salesInvoices',
-  'roomTypes','rooms','reservations',
+  'roomTypes','rooms','reservations','reservationInvoices','posTickets',
   'receipts','vouchers','bills',
   'pettyCashConfig', // legacy single object — kept only so old saves migrate cleanly; unused by new code
   'pettyCashFloats',
@@ -1946,37 +1946,126 @@ const Posting = (function(){
     return createdIds.map(id=>Store.find('salesInvoices', id));
   }
 
-  /* ---- Guesthouse reservation folio invoice: posted once, at check-out,
-     once nights/rate/extras are final (mirrors postBookingInvoice's shape
-     but for the much simpler single-room, base-currency-only Guesthouse
-     model — see reservations.js). Idempotent via reservation.invoiceJournalId. ---- */
-  function postReservationInvoice(reservation){
-    if(reservation.invoiceJournalId) return Store.find('journalEntries', reservation.invoiceJournalId);
-    const customer = Store.find('customers', reservation.customerId);
+  /* ---- Guesthouse reservation folio invoicing — one JE + one invoice
+     DOCUMENT covering one or more checked-out reservations for the SAME
+     customer, posted once their folios are final. Direct guests invoice
+     immediately at check-out (one reservation per invoice, called from
+     reservations.js); agent-billed guests instead accumulate as
+     "checked out, uninvoiced" until the front desk bundles several of an
+     agent's stays into one invoice from the Agent invoicing screen —
+     mirrors a real guesthouse handing one agent one statement instead of
+     a slip per booking. Idempotent per reservation via
+     reservation.reservationInvoiceId; a reservation already on an
+     invoice is excluded by the caller (reservations.js only offers
+     un-invoiced, checked-out reservations for selection). ---- */
+  function postReservationsInvoice(reservationIds){
+    const reservations = reservationIds.map(id=>Store.find('reservations', id)).filter(Boolean);
+    if(!reservations.length) throw new Error('No reservations to invoice.');
+    if(reservations.some(r=>r.reservationInvoiceId)) throw new Error('One of these reservations is already invoiced.');
+    const customerId = reservations[0].customerId;
+    if(reservations.some(r=>r.customerId!==customerId)) throw new Error('All reservations on one invoice must share the same customer.');
+    const customer = Store.find('customers', customerId);
     if(!customer) throw new Error('Reservation has no customer.');
+
     const arAccount = customer.type==='AGENT' ? Store.acctId('1110') : Store.acctId('1120');
     const roomAccount = Store.acctId('4000');
     const extrasAccount = Store.acctId('4010');
     const taxAccount = Store.acctId('2100');
-    const rate = Ledger.round2(reservation.rate||0);
-    const nights = reservation.nights||0;
-    const roomTotal = Ledger.round2(rate*nights);
-    const extrasTotal = Ledger.round2((reservation.extras||[]).reduce((s,e)=>s+(e.amount||0),0));
-    const subTotal = Ledger.round2(roomTotal+extrasTotal);
     const taxRate = (Store.settings.defaultTaxRate||0)/100;
-    const taxTotal = Ledger.round2(subTotal*taxRate);
 
-    const jeLines = [{ accountId: arAccount, debit: Ledger.round2(subTotal+taxTotal), credit:0, partyType:'customer', partyId:customer.id, memo:'Reservation '+reservation.reservationNo }];
-    if(roomTotal>0.004) jeLines.push({ accountId: roomAccount, debit:0, credit: roomTotal, memo:'Room charge — '+reservation.reservationNo });
-    if(extrasTotal>0.004) jeLines.push({ accountId: extrasAccount, debit:0, credit: extrasTotal, memo:'Extras — '+reservation.reservationNo });
-    if(taxTotal>0.004) jeLines.push({ accountId: taxAccount, debit:0, credit: taxTotal, memo:'Output tax — reservation '+reservation.reservationNo });
+    let roomTotal=0, extrasTotal=0;
+    const lines = reservations.map(r=>{
+      const rT = Ledger.round2((r.rate||0)*(r.nights||0));
+      const eT = Ledger.round2((r.extras||[]).reduce((s,e)=>s+(e.amount||0),0));
+      roomTotal = Ledger.round2(roomTotal+rT); extrasTotal = Ledger.round2(extrasTotal+eT);
+      return { reservationId:r.id, reservationNo:r.reservationNo, roomAmount:rT, extrasAmount:eT, amount:Ledger.round2(rT+eT) };
+    });
+    const subTotal = Ledger.round2(roomTotal+extrasTotal);
+    const taxTotal = Ledger.round2(subTotal*taxRate);
+    const total = Ledger.round2(subTotal+taxTotal);
+    const refNos = reservations.map(r=>r.reservationNo).join(', ');
+
+    const jeLines = [{ accountId: arAccount, debit: total, credit:0, partyType:'customer', partyId:customer.id, memo:'Reservations '+refNos }];
+    if(roomTotal>0.004) jeLines.push({ accountId: roomAccount, debit:0, credit: roomTotal, memo:'Room charges — '+refNos });
+    if(extrasTotal>0.004) jeLines.push({ accountId: extrasAccount, debit:0, credit: extrasTotal, memo:'Extras — '+refNos });
+    if(taxTotal>0.004) jeLines.push({ accountId: taxAccount, debit:0, credit: taxTotal, memo:'Output tax — '+refNos });
 
     const je = Ledger.post({
-      date: todayISO(), ref: reservation.reservationNo, description: `Folio for reservation ${reservation.reservationNo} (${customer.name})`,
-      sourceType:'reservation', sourceId: reservation.id, lines: jeLines
+      date: todayISO(), ref: refNos, description: `Folio invoice for ${customer.name} (${reservations.length} reservation${reservations.length>1?'s':''})`,
+      sourceType:'reservationInvoice', sourceId: null, lines: jeLines
     });
-    Store.update('reservations', reservation.id, { invoiceJournalId: je.id, invoiceTotal: Ledger.round2(subTotal+taxTotal), invoiceTax: taxTotal, invoiceSub: subTotal });
-    return je;
+    const invoice = Store.insert('reservationInvoices', {
+      invoiceNo: Store.docNo('RINV','reservationInvoice'), customerId, reservationIds: reservations.map(r=>r.id),
+      lines, subTotal, tax: taxTotal, total, date: todayISO(), journalId: je.id
+    });
+    Store.update('journalEntries', je.id, { sourceId: invoice.id }); // link back now that the invoice id exists
+    reservations.forEach(r=>Store.update('reservations', r.id, { reservationInvoiceId: invoice.id }));
+    return invoice;
+  }
+
+  // A reservation invoice's outstanding balance — sums only the portions of
+  // past receipts actually allocated to it (receipt.allocations), not a
+  // customer-wide AR net, so two invoices for the same agent can show
+  // independent "partially paid" balances the way a real statement would.
+  function reservationInvoiceBalance(invoice){
+    const applied = Store.all('receipts').reduce((s,r)=>
+      s + (r.allocations||[]).filter(a=>a.reservationInvoiceId===invoice.id).reduce((s2,a)=>s2+(a.amount||0),0), 0);
+    return Ledger.round2((invoice.total||0) - applied);
+  }
+
+  // Applies one payment from an agent/guest across their outstanding
+  // reservation invoices, oldest first, clamping to what's actually owed —
+  // exactly one receipt/JE regardless of how many invoices it touches; the
+  // per-invoice split lives in receipt.allocations for display only.
+  function collectReservationPayment(customerId, amount, method, date){
+    const open = Store.where('reservationInvoices', inv=>inv.customerId===customerId)
+      .map(inv=>({ inv, balance: reservationInvoiceBalance(inv) }))
+      .filter(x=>x.balance>0.004)
+      .sort((a,b)=>(a.inv.date||'').localeCompare(b.inv.date||'') || a.inv.invoiceNo.localeCompare(b.inv.invoiceNo));
+    const totalOwed = Ledger.round2(open.reduce((s,x)=>s+x.balance,0));
+    let remaining = Ledger.round2(Math.min(amount, totalOwed));
+    if(remaining<=0.004) throw new Error('Nothing outstanding to collect.');
+    const applied = remaining;
+    const allocations = [];
+    for(const {inv, balance} of open){
+      if(remaining<=0.004) break;
+      const take = Ledger.round2(Math.min(balance, remaining));
+      allocations.push({ reservationInvoiceId: inv.id, amount: take });
+      remaining = Ledger.round2(remaining-take);
+    }
+    const customer = Store.find('customers', customerId);
+    const receipt = Store.insert('receipts', {
+      receiptNo: Store.docNo('RCT','receipt'), customerId, date: date||todayISO(), method,
+      currency: Pricing.baseCurrency(), amount: applied, allocations
+    });
+    const je = postReceipt(receipt);
+    return { receipt, je, applied, clamped: applied<Ledger.round2(amount), totalOwed };
+  }
+
+  /* ---- Guesthouse POS ticket settled directly at the table/bar — paid on
+     the spot, so it's its own small receipt against Extras & Other
+     Charges, independent of any room folio or agent invoice. A ticket
+     left unpaid instead gets folded into its reservation's folio as an
+     extra at check-out (see reservations.js). ---- */
+  function postPosTicketPayment(ticket, method){
+    if(ticket.receiptId) return Store.find('receipts', ticket.receiptId);
+    const extrasAccount = Store.acctId('4010');
+    const m = methodDef(method);
+    const isFob = m && m.kind==='FOB';
+    const settleAccount = isFob ? Store.acctId('6500') : resolveMethodAccountId(method, Pricing.baseCurrency());
+    const je = Ledger.post({
+      date: todayISO(), ref: ticket.ticketNo,
+      description: `${isFob?'Complimentary write-off':'POS ticket'} ${ticket.ticketNo} settled at table`,
+      sourceType:'posTicket', sourceId: ticket.id,
+      lines: [
+        { accountId: settleAccount, debit: ticket.total, credit:0, memo: ticket.ticketNo },
+        { accountId: extrasAccount, debit:0, credit: ticket.total, memo: 'POS ticket '+ticket.ticketNo }
+      ]
+    });
+    const receipt = Store.insert('receipts', { receiptNo: Store.docNo('RCT','receipt'), date: todayISO(), method,
+      currency: Pricing.baseCurrency(), amount: ticket.total, posTicketId: ticket.id, journalId: je.id });
+    Store.update('posTickets', ticket.id, { status:'PAID', paidAt: todayISO(), paidMethod: method, receiptId: receipt.id });
+    return receipt;
   }
 
   /* ---- Receipt from a customer (deposit or balance). CASH lands in the
@@ -2242,7 +2331,7 @@ const Posting = (function(){
 
   return { postBookingInvoice, generateSalesInvoice, postReceipt, postAgentCommission, postBill, postVoucher, postAdvance, postPayrollRun,
            postDayEndClose, postDeposit, taxRateFor, billableLines, clearingAccountForMethod, resolveMethodAccountId, methodDef, pettyFloatFor,
-           postReservationInvoice };
+           postReservationsInvoice, reservationInvoiceBalance, collectReservationPayment, postPosTicketPayment };
 })();
 
 window.Posting = Posting;
@@ -5631,13 +5720,26 @@ window.Posting = Posting;
 /* ---- modules/reservations.js ---- */
 /* ---------------------------------------------------------------------
    reservations.js — Guesthouse room/night bookings: create a reservation
-   against an available room for a date range, check the guest in, add
-   any extra charges during the stay, check out (which finalizes and
-   posts the folio invoice), then collect payment. This is the
-   Guesthouse's equivalent of calendar.js + bookings.js + manifest.js for
-   a Dive/Excursion Centre — it is a genuinely different booking shape
-   (date-range stays on a room, not single-date trips on a boat), so it
-   is its own module rather than a relabeled trip.
+   against an available room for a date range, add every guest sharing
+   that room up to its type's capacity, check the guest(s) in, add any
+   extra charges during the stay, check out (which finalizes the folio),
+   then invoice and collect payment. This is the Guesthouse's equivalent
+   of calendar.js + bookings.js + manifest.js for a Dive/Excursion
+   Centre — it is a genuinely different booking shape (date-range stays
+   on a room with several guests, not single-date trips on a boat), so
+   it is its own module rather than a relabeled trip.
+
+   Invoicing has two paths, matching how a real guesthouse bills:
+     - Direct guests invoice immediately at check-out, one reservation
+       per invoice (reservationInvoices with one line) — same as before.
+     - Agent-billed guests instead sit "checked out, uninvoiced" until
+       the front desk bundles several of that agent's stays into one
+       invoice from the Agent invoicing screen (/resinvoicing), so an
+       agent gets one statement instead of a slip per booking.
+   Both paths go through Posting.postReservationsInvoice([...ids]),
+   which always produces one reservationInvoices document (even for a
+   single reservation) so invoice detail/printing and payment collection
+   work the same way regardless of how many reservations are on it.
 
    A reservation's nights/rate are fixed at creation and don't
    auto-adjust for an early/late actual check-out — a known v1
@@ -5679,14 +5781,21 @@ window.Posting = Posting;
     return Store.where('rooms', r=>r.roomTypeId===roomTypeId).filter(r=>roomIsFree(r.id, checkIn, checkOut, excludeResId));
   }
 
-  function balanceInfo(res){
-    const paid = Ledger.round2(Store.where('receipts', r=>r.reservationId===res.id).reduce((s,r)=>s+(r.amount||0),0));
-    const total = res.invoiceTotal || 0;
-    return { total, paid, balance: Ledger.round2(total-paid) };
+  // Unpaid POS tickets for a reservation that haven't been folded into its
+  // extras yet — shown as a preview in the live folio, then merged into
+  // real extras lines (and marked BILLED) the moment the guest checks out.
+  function pendingTickets(resId){
+    return Store.where('posTickets', t=>t.reservationId===resId && t.status==='UNPAID');
   }
+
+  function roomTotalFor(res){ return Ledger.round2((res.rate||0)*(res.nights||0)); }
+  function extrasTotalFor(res){ return Ledger.round2((res.extras||[]).reduce((s,e)=>s+(e.amount||0),0)); }
+
+  function invoiceFor(res){ return res.reservationInvoiceId ? Store.find('reservationInvoices', res.reservationInvoiceId) : null; }
 
   /* ---------------- LIST ---------------- */
   function render(params){
+    if(params.id==='x') return; // reserved prefix for tab-style sub-screens below
     if(params.id) return detail(params);
     setPageTitle('Reservations', 'Bookings');
     renderNav();
@@ -5695,15 +5804,20 @@ window.Posting = Posting;
     qs('#content').innerHTML = `
       <div class="toolbar"><div class="spacer"></div>${vo?'':`<button class="btn btn-primary" id="res-add">+ New reservation</button>`}</div>
       <div class="table-wrap"><table class="t">
-        <thead><tr><th>Reservation</th><th>Guest</th><th>Room</th><th>Check-in</th><th>Check-out</th><th>Nights</th><th>Status</th><th></th></tr></thead>
+        <thead><tr><th>Reservation</th><th>Guests</th><th>Room</th><th>Check-in</th><th>Check-out</th><th>Nights</th><th>Status</th><th>Invoice</th><th></th></tr></thead>
         <tbody>
         ${reservations.length ? reservations.map(r=>{
-          const guest = Store.find('guests', r.guestId);
+          const primary = Store.find('guests', (r.guests&&r.guests[0]||{}).guestId);
           const room = Store.find('rooms', r.roomId);
-          return `<tr><td class="mono">${esc(r.reservationNo)}</td><td>${esc(guest?guest.name:'—')}</td><td>${esc(room?room.number:'—')}</td>
+          const inv = invoiceFor(r);
+          const guestCount = (r.guests||[]).length;
+          return `<tr><td class="mono">${esc(r.reservationNo)}</td>
+            <td>${esc(primary?primary.name:'—')}${guestCount>1?` <span class="muted small">+${guestCount-1}</span>`:''}</td>
+            <td>${esc(room?room.number:'—')}</td>
             <td>${fmtDate(r.checkIn)}</td><td>${fmtDate(r.checkOut)}</td><td>${r.nights}</td><td>${statusBadge(r.status)}</td>
+            <td>${inv?`<span class="mono small">${esc(inv.invoiceNo)}</span>`:(r.status==='CHECKED_OUT'?'<span class="badge badge-amber">Awaiting invoice</span>':'<span class="muted small">—</span>')}</td>
             <td class="row-actions"><button class="btn btn-sm" data-view="${r.id}">Open</button></td></tr>`;
-        }).join('') : `<tr><td colspan="8" class="table-empty">No reservations yet.</td></tr>`}
+        }).join('') : `<tr><td colspan="9" class="table-empty">No reservations yet.</td></tr>`}
         </tbody>
       </table></div>
     `;
@@ -5720,8 +5834,8 @@ window.Posting = Posting;
       title:'New reservation', size:'lg',
       bodyHtml: `
         <div class="form-row">
-          <div class="field"><label>Customer</label><select id="rf-customer">${customers.map(c=>`<option value="${c.id}" ${c.id==='CUST_DIRECT'?'selected':''}>${esc(c.name)}</option>`).join('')}</select></div>
-          <div class="field"><label>Guest</label>
+          <div class="field"><label>Customer</label><select id="rf-customer">${customers.map(c=>`<option value="${c.id}" ${c.id==='CUST_DIRECT'?'selected':''}>${esc(c.name)}${c.type==='AGENT'?' (agent)':''}</option>`).join('')}</select></div>
+          <div class="field"><label>Primary guest</label>
             <select id="rf-guest"><option value="">Select…</option>${guests.map(g=>`<option value="${g.id}">${esc(g.name)}</option>`).join('')}</select>
           </div>
         </div>
@@ -5730,10 +5844,11 @@ window.Posting = Posting;
           <div class="field"><label>Check-in</label><input id="rf-checkin" type="date" value="${todayISO()}"></div>
           <div class="field"><label>Check-out</label><input id="rf-checkout" type="date" value="${todayISO()}"></div>
         </div>
-        <div class="field"><label>Room type</label><select id="rf-type">${roomTypes.map(t=>`<option value="${t.id}">${esc(t.name)} (${fmtMoney(t.nightlyRate)}/night)</option>`).join('')}</select></div>
+        <div class="field"><label>Room type</label><select id="rf-type">${roomTypes.map(t=>`<option value="${t.id}">${esc(t.name)} (${fmtMoney(t.nightlyRate)}/night, up to ${t.maxOccupancy||1})</option>`).join('')}</select></div>
         <div class="field"><label>Room</label><select id="rf-room"></select></div>
         <div class="field"><label>Rate (per night)</label><input id="rf-rate" type="number" min="0" step="0.01"></div>
         <p class="hint" id="rf-avail"></p>
+        <p class="hint">More guests can be added to this room, up to its capacity, after the reservation is created.</p>
       `,
       footerHtml: `<button class="btn" data-close>Cancel</button><button class="btn btn-primary" id="rf-save">Create reservation</button>`,
       onMount(modal){
@@ -5765,9 +5880,10 @@ window.Posting = Posting;
           const nights = nightsBetween(checkIn, checkOut);
           const res = Store.insert('reservations', {
             reservationNo: Store.docNo('RES','reservation'),
-            customerId: qs('#rf-customer', modal).value, guestId,
+            customerId: qs('#rf-customer', modal).value,
             roomTypeId: typeSel.value, roomId,
             checkIn, checkOut, nights, rate, extras: [],
+            guests: [{ id: Store.uid('rg'), guestId, isPrimary:true }],
             status:'CONFIRMED'
           });
           closeModal(); toast('Reservation created', 'ok'); Router.navigate('reservations/'+res.id);
@@ -5778,28 +5894,33 @@ window.Posting = Posting;
 
   /* ---------------- DETAIL ---------------- */
   function detail(params){
+    if(params.sub==='confirm') return guestConfirmation(params);
     const res = Store.find('reservations', params.id);
     if(!res){ setPageTitle('Reservation', 'Bookings'); qs('#content').innerHTML = `<div class="empty-state card"><h3>Reservation not found</h3></div>`; return; }
     setPageTitle(res.reservationNo, 'Bookings');
     renderNav();
-    const guest = Store.find('guests', res.guestId);
     const customer = Store.find('customers', res.customerId);
     const room = Store.find('rooms', res.roomId);
     const roomType = Store.find('roomTypes', res.roomTypeId);
     const vo = Auth.isViewOnly();
-    const invoiced = !!res.invoiceJournalId;
-    const roomTotal = Ledger.round2((res.rate||0)*(res.nights||0));
-    const extrasTotal = Ledger.round2((res.extras||[]).reduce((s,e)=>s+(e.amount||0),0));
-    const info = invoiced ? balanceInfo(res) : null;
-    const receipts = invoiced ? Store.where('receipts', r=>r.reservationId===res.id) : [];
+    const inv = invoiceFor(res);
+    const roomTotal = roomTotalFor(res);
+    const extrasTotal = extrasTotalFor(res);
+    const tickets = pendingTickets(res.id);
+    const ticketsTotal = Ledger.round2(tickets.reduce((s,t)=>s+(t.total||0),0));
+    const guestLines = res.guests||[];
+    const maxOcc = roomType ? (roomType.maxOccupancy||1) : 1;
+    const atCapacity = guestLines.length>=maxOcc;
+    const balance = inv ? Posting.reservationInvoiceBalance(inv) : null;
+    const receipts = inv ? Store.where('receipts', r=>(r.allocations||[]).some(a=>a.reservationInvoiceId===inv.id)) : [];
 
     qs('#content').innerHTML = `
       <div class="card mb-16">
         <div class="grid grid-4">
-          <div><div class="small muted">Guest</div><div><strong>${esc(guest?guest.name:'—')}</strong></div></div>
-          <div><div class="small muted">Customer</div><div><strong>${esc(customer?customer.name:'—')}</strong></div></div>
+          <div><div class="small muted">Customer</div><div><strong>${esc(customer?customer.name:'—')}</strong>${customer&&customer.type==='AGENT'?' <span class="badge badge-teal small">Agent</span>':''}</div></div>
           <div><div class="small muted">Room</div><div><strong>${esc(room?room.number:'—')} (${esc(roomType?roomType.name:'—')})</strong></div></div>
           <div><div class="small muted">Status</div><div>${statusBadge(res.status)}</div></div>
+          <div><div class="small muted">Guests</div><div>${guestLines.length} / ${maxOcc}</div></div>
         </div>
         <div class="grid grid-4 mt-12">
           <div><div class="small muted">Check-in</div><div>${fmtDate(res.checkIn)}</div></div>
@@ -5810,43 +5931,72 @@ window.Posting = Posting;
       </div>
 
       <div class="card mb-16">
-        <div class="card-head"><h2>Folio</h2>${(!invoiced && res.status==='CHECKED_IN' && !vo)?`<button class="btn btn-sm" id="res-add-extra">+ Add extra charge</button>`:''}</div>
+        <div class="card-head"><h2>Guests</h2>${(res.status!=='CANCELLED' && res.status!=='NO_SHOW' && !atCapacity && !vo)?`<button class="btn btn-sm" id="res-add-guest">+ Add guest</button>`:''}</div>
+        <div class="table-wrap"><table class="t">
+          <thead><tr><th>Guest</th><th></th><th></th></tr></thead>
+          <tbody>
+            ${guestLines.map(gl=>{
+              const g = Store.find('guests', gl.guestId);
+              return `<tr><td>${esc(g?g.name:'—')}${gl.isPrimary?' <span class="badge badge-gray small">Primary</span>':''}</td>
+                <td><a class="btn btn-sm" href="#/reservations/${res.id}/confirm?g=${encodeURIComponent(gl.id)}">View confirmation</a></td>
+                <td>${(!gl.isPrimary && !vo && res.status!=='CHECKED_OUT')?`<button class="btn btn-sm btn-ghost" data-remove-guest="${gl.id}">Remove</button>`:''}</td></tr>`;
+            }).join('')}
+          </tbody>
+        </table></div>
+        ${atCapacity?`<p class="hint mt-8">Room ${esc(room?room.number:'')} is at capacity (${maxOcc} of ${maxOcc}). Remove a guest or move this one to another room.</p>`:''}
+      </div>
+
+      <div class="card mb-16">
+        <div class="card-head"><h2>Folio</h2>${(!inv && res.status==='CHECKED_IN' && !vo)?`<button class="btn btn-sm" id="res-add-extra">+ Add extra charge</button>`:''}</div>
         <div class="table-wrap"><table class="t">
           <thead><tr><th>Item</th><th class="num">Amount</th></tr></thead>
           <tbody>
             <tr><td>Room — ${res.nights} night(s) × ${fmtMoney(res.rate)}</td><td class="num">${fmtMoney(roomTotal)}</td></tr>
             ${(res.extras||[]).map(e=>`<tr><td>${esc(e.description)}</td><td class="num">${fmtMoney(e.amount)}</td></tr>`).join('')}
-            ${invoiced ? `
-              <tr><td>Subtotal</td><td class="num">${fmtMoney(res.invoiceSub)}</td></tr>
-              <tr><td>Tax</td><td class="num">${fmtMoney(res.invoiceTax)}</td></tr>
-              <tr class="report-total"><td>Total</td><td class="num">${fmtMoney(res.invoiceTotal)}</td></tr>
-            ` : `<tr class="report-subtotal"><td>Estimated total (not yet invoiced)</td><td class="num">${fmtMoney(Ledger.round2(roomTotal+extrasTotal))}</td></tr>`}
+            ${tickets.map(t=>`<tr><td>${esc(t.ticketNo)} — ${esc((t.items||[]).map(i=>i.description).join(', '))} <span class="badge badge-amber small">Unpaid ticket</span></td><td class="num">${fmtMoney(t.total)}</td></tr>`).join('')}
+            ${inv ? `
+              <tr><td>Subtotal</td><td class="num">${fmtMoney(inv.lines.find(l=>l.reservationId===res.id)?.amount ?? extrasTotal+roomTotal)}</td></tr>
+              <tr class="report-subtotal"><td>See the linked invoice for tax &amp; total — this folio may be combined with other stays on it.</td><td></td></tr>
+            ` : `<tr class="report-subtotal"><td>Estimated total (not yet invoiced)</td><td class="num">${fmtMoney(Ledger.round2(roomTotal+extrasTotal+ticketsTotal))}</td></tr>`}
           </tbody>
         </table></div>
       </div>
 
-      ${invoiced ? `
+      ${inv ? `
       <div class="card mb-16">
-        <div class="card-head"><h2>Payments</h2></div>
+        <div class="card-head"><h2>Invoice</h2></div>
+        <div class="grid grid-3 mt-8">
+          <div><div class="small muted">Invoice</div><div><a href="#/resinvoices/${inv.id}">${esc(inv.invoiceNo)}</a>${inv.reservationIds.length>1?` <span class="muted small">(covers ${inv.reservationIds.length} reservations)</span>`:''}</div></div>
+          <div><div class="small muted">Total</div><div>${fmtMoney(inv.total)}</div></div>
+          <div><div class="small muted">Balance due</div><div><strong>${fmtMoney(balance)}</strong></div></div>
+        </div>
         <div class="table-wrap"><table class="t">
           <thead><tr><th>Receipt #</th><th>Date</th><th>Method</th><th class="num">Amount</th></tr></thead>
           <tbody>
-          ${receipts.length ? receipts.map(r=>`<tr><td>${esc(r.receiptNo)}</td><td>${fmtDate(r.date)}</td><td>${esc(CashModule.methodLabel(r.method))}</td><td class="num">${fmtMoney(r.amount)}</td></tr>`).join('')
+          ${receipts.length ? receipts.map(r=>`<tr><td>${esc(r.receiptNo)}</td><td>${fmtDate(r.date)}</td><td>${esc(CashModule.methodLabel(r.method))}</td><td class="num">${fmtMoney((r.allocations||[]).find(a=>a.reservationInvoiceId===inv.id)?.amount||0)}</td></tr>`).join('')
             : `<tr><td colspan="4" class="table-empty">No payments recorded yet.</td></tr>`}
           </tbody>
         </table></div>
-        <div class="mt-12"><strong>Balance due: ${fmtMoney(info.balance)}</strong></div>
-      </div>` : ''}
+      </div>` : (res.status==='CHECKED_OUT' ? `
+      <div class="card mb-16">
+        <div class="pad"><p class="hint">Checked out and awaiting invoice — ${customer&&customer.type==='AGENT'?`bundle this stay with the rest of ${esc(customer.name)}'s reservations from <a href="#/resinvoicing">Agent invoicing</a>.`:`this guest's invoice will be generated automatically.`}</p></div>
+      </div>` : '')}
 
       ${vo?'':`<div class="flex-gap wrap">
         ${res.status==='CONFIRMED' ? `<button class="btn btn-primary" id="res-checkin">Check in</button>
           <button class="btn btn-danger" id="res-cancel">Cancel reservation</button>
           <button class="btn btn-ghost" id="res-noshow">Mark no-show</button>` : ''}
-        ${res.status==='CHECKED_IN' && !invoiced ? `<button class="btn btn-primary" id="res-checkout">Check out &amp; invoice</button>` : ''}
-        ${invoiced && info.balance>0.004 ? `<button class="btn btn-primary" id="res-collect">Collect payment</button>` : ''}
+        ${res.status==='CHECKED_IN' ? `<button class="btn btn-primary" id="res-checkout">Check out &amp; finalize folio</button>` : ''}
+        ${inv && balance>0.004 ? `<button class="btn btn-primary" id="res-collect">Collect payment (this invoice)</button>` : ''}
       </div>`}
     `;
 
+    if(qs('#res-add-guest')) qs('#res-add-guest').addEventListener('click', ()=>openAddGuestForm(res, roomType));
+    qsa('[data-remove-guest]').forEach(b=>b.addEventListener('click', ()=>{
+      const lines = (res.guests||[]).filter(gl=>gl.id!==b.dataset.removeGuest);
+      Store.update('reservations', res.id, { guests: lines });
+      toast('Guest removed'); detail(params);
+    }));
     if(qs('#res-add-extra')) qs('#res-add-extra').addEventListener('click', ()=>openAddExtraForm(res));
     if(qs('#res-checkin')) qs('#res-checkin').addEventListener('click', ()=>{
       Store.update('rooms', res.roomId, { status:'OCCUPIED' });
@@ -5854,11 +6004,26 @@ window.Posting = Posting;
       toast('Guest checked in', 'ok'); detail(params);
     });
     if(qs('#res-checkout')) qs('#res-checkout').addEventListener('click', ()=>{
-      try{ Posting.postReservationInvoice(Store.find('reservations', res.id)); }
-      catch(e){ toast(e.message, 'err'); return; }
+      // Fold any still-unpaid POS tickets into the folio as real extras
+      // before freezing it — once checked out, the folio is final and
+      // independent of later ticket changes.
+      const unpaid = pendingTickets(res.id);
+      let extras = (res.extras||[]).slice();
+      unpaid.forEach(t=>{
+        extras.push({ id: Store.uid('ex'), description: `${t.ticketNo} — ${(t.items||[]).map(i=>i.description).join(', ')}`, amount: Ledger.round2(t.total) });
+        Store.update('posTickets', t.id, { status:'BILLED' });
+      });
+      Store.update('reservations', res.id, { extras, status:'CHECKED_OUT' });
       Store.update('rooms', res.roomId, { status:'VACANT_DIRTY' });
-      Store.update('reservations', res.id, { status:'CHECKED_OUT' });
-      toast('Checked out — folio invoiced', 'ok'); detail(params);
+      const fresh = Store.find('reservations', res.id);
+      const cust = Store.find('customers', fresh.customerId);
+      if(cust && cust.type!=='AGENT'){
+        try{ Posting.postReservationsInvoice([fresh.id]); toast('Checked out — folio invoiced', 'ok'); }
+        catch(e){ toast(e.message, 'err'); }
+      } else {
+        toast('Checked out — awaiting agent invoice', 'ok');
+      }
+      detail(params);
     });
     if(qs('#res-cancel')) qs('#res-cancel').addEventListener('click', ()=>{
       confirmDialog('Cancel this reservation?', ()=>{
@@ -5870,7 +6035,34 @@ window.Posting = Posting;
       Store.update('reservations', res.id, { status:'NO_SHOW' });
       toast('Marked as no-show'); detail(params);
     });
-    if(qs('#res-collect')) qs('#res-collect').addEventListener('click', ()=>openCollectPaymentForm(res, ()=>detail(params)));
+    if(qs('#res-collect')) qs('#res-collect').addEventListener('click', ()=>openCollectInvoicePaymentForm(inv, ()=>detail(params)));
+  }
+
+  function openAddGuestForm(res, roomType){
+    const guests = Store.all('guests');
+    const maxOcc = roomType ? (roomType.maxOccupancy||1) : 1;
+    if((res.guests||[]).length>=maxOcc){ toast('This room is already at capacity.', 'err'); return; }
+    openModal({
+      title:'Add guest',
+      bodyHtml: `
+        <div class="field"><label>Guest</label><select id="ag-guest"><option value="">Select…</option>${guests.map(g=>`<option value="${g.id}">${esc(g.name)}</option>`).join('')}</select></div>
+        <div class="field"><label>New guest name <span class="hint">(if not listed above)</span></label><input id="ag-newguest" type="text"></div>
+      `,
+      footerHtml: `<button class="btn" data-close>Cancel</button><button class="btn btn-primary" id="ag-save">Add guest</button>`,
+      onMount(modal){
+        qs('#ag-save', modal).addEventListener('click', ()=>{
+          let guestId = qs('#ag-guest', modal).value;
+          const newName = qs('#ag-newguest', modal).value.trim();
+          if(!guestId && newName) guestId = Store.insert('guests', { name:newName }).id;
+          if(!guestId){ toast('Pick or add a guest.', 'err'); return; }
+          const fresh = Store.find('reservations', res.id);
+          if((fresh.guests||[]).length>=maxOcc){ toast('This room is already at capacity.', 'err'); return; }
+          const guests = (fresh.guests||[]).concat([{ id: Store.uid('rg'), guestId, isPrimary:false }]);
+          Store.update('reservations', res.id, { guests });
+          closeModal(); toast('Guest added', 'ok'); detail({id:res.id});
+        });
+      }
+    });
   }
 
   function openAddExtraForm(res){
@@ -5895,38 +6087,276 @@ window.Posting = Posting;
     });
   }
 
-  function openCollectPaymentForm(res, onSaved){
-    const info = balanceInfo(res);
-    if(info.balance<=0.004){ toast('This reservation has no balance due.', 'err'); return; }
+  // Collect a payment against ONE specific invoice (from the reservation
+  // or invoice detail page) — clamped to that invoice's own balance, never
+  // spilling into another invoice. The bulk, oldest-first version lives on
+  // the Outstanding balances screen (collectCustomerPaymentForm below).
+  function openCollectInvoicePaymentForm(inv, onSaved){
+    const balance = Posting.reservationInvoiceBalance(inv);
+    if(balance<=0.004){ toast('This invoice has no balance due.', 'err'); return; }
     const methods = Store.settings.paymentMethods||[];
     openModal({
       title:'Collect payment',
       bodyHtml: `
         <dl class="kv mb-16">
-          <dt>Reservation</dt><dd>${esc(res.reservationNo)}</dd>
-          <dt>Balance due</dt><dd>${fmtMoney(info.balance)}</dd>
+          <dt>Invoice</dt><dd>${esc(inv.invoiceNo)}</dd>
+          <dt>Balance due</dt><dd>${fmtMoney(balance)}</dd>
         </dl>
         <div class="form-row">
           <div class="field"><label>Settle via</label><select id="rcp-method">${methods.map(m=>`<option value="${m.id}">${esc(m.label)}</option>`).join('')}</select></div>
           <div class="field"><label>Date</label><input id="rcp-date" type="date" value="${todayISO()}"></div>
         </div>
-        <div class="field"><label>Amount</label><input id="rcp-amount" type="number" min="0.01" step="0.01" value="${info.balance.toFixed(2)}"></div>
+        <div class="field"><label>Amount</label><input id="rcp-amount" type="number" min="0.01" step="0.01" value="${balance.toFixed(2)}"></div>
       `,
       footerHtml: `<button class="btn" data-close>Cancel</button><button class="btn btn-primary" id="rcp-save">Record payment</button>`,
       onMount(modal){
         qs('#rcp-save', modal).addEventListener('click', ()=>{
           const amount = parseFloat(qs('#rcp-amount', modal).value);
           if(!amount || amount<=0){ toast('Enter an amount.', 'err'); return; }
-          if(amount > info.balance+0.01){ toast('Amount cannot exceed the balance due.', 'err'); return; }
-          const receipt = { receiptNo: Store.docNo('RCT','receipt'), customerId: res.customerId, reservationId: res.id,
-            date: qs('#rcp-date', modal).value||todayISO(), method: qs('#rcp-method', modal).value,
-            currency: Pricing.baseCurrency(), amount: Ledger.round2(amount) };
-          Store.insert('receipts', receipt);
+          const applied = Ledger.round2(Math.min(amount, balance));
+          const method = qs('#rcp-method', modal).value, date = qs('#rcp-date', modal).value||todayISO();
+          const receipt = Store.insert('receipts', { receiptNo: Store.docNo('RCT','receipt'), customerId: inv.customerId,
+            date, method, currency: Pricing.baseCurrency(), amount: applied,
+            allocations: [{ reservationInvoiceId: inv.id, amount: applied }] });
           try{ Posting.postReceipt(receipt); }
           catch(e){ toast(e.message, 'err'); return; }
-          closeModal(); toast('Payment recorded', 'ok'); if(onSaved) onSaved();
+          closeModal();
+          toast(applied<amount ? `Amount clamped to the ${fmtMoney(balance)} outstanding.` : 'Payment recorded', 'ok');
+          if(onSaved) onSaved();
         });
       }
+    });
+  }
+
+  /* ---------------- GUEST CONFIRMATION ---------------- */
+  // Each guest sharing a room gets their own confirmation — their own
+  // details only, no roommate's information leaking across.
+  function guestConfirmation(params){
+    const res = Store.find('reservations', params.id);
+    const line = res && (res.guests||[]).find(gl=>gl.id===params.g);
+    if(!res || !line){ setPageTitle('Confirmation', 'Bookings'); qs('#content').innerHTML = `<div class="empty-state card"><h3>Confirmation not found</h3></div>`; return; }
+    const guest = Store.find('guests', line.guestId);
+    const room = Store.find('rooms', res.roomId);
+    const roomType = Store.find('roomTypes', res.roomTypeId);
+    setPageTitle('Confirmation — '+ (guest?guest.name:''), 'Bookings');
+    renderNav();
+    qs('#content').innerHTML = `
+      <div class="card" style="max-width:520px">
+        <div class="pad">
+          <div class="small muted">${esc(Store.settings.companyName||'')}</div>
+          <h2>Booking confirmation · ${esc(res.reservationNo)}</h2>
+          <div class="grid grid-2 mt-12">
+            <div><div class="small muted">Guest</div><div>${esc(guest?guest.name:'—')}</div></div>
+            <div><div class="small muted">Room</div><div>${esc(room?room.number:'—')} · ${esc(roomType?roomType.name:'—')}</div></div>
+            <div><div class="small muted">Stay</div><div>${fmtDate(res.checkIn)} – ${fmtDate(res.checkOut)}</div></div>
+            <div><div class="small muted">Nights</div><div>${res.nights}</div></div>
+          </div>
+          <p class="hint mt-12">This confirmation is specific to ${esc(guest?guest.name:'this guest')} — any other guest sharing this room has their own, separate confirmation.</p>
+          <a class="btn mt-12" href="#/reservations/${res.id}">← Back to reservation</a>
+        </div>
+      </div>
+    `;
+  }
+
+  /* ---------------- RESERVATION INVOICES (list/detail) ---------------- */
+  function renderResInvoices(params){
+    if(params.id) return resInvoiceDetail(params);
+    setPageTitle('Reservation invoices', 'Bookings');
+    renderNav();
+    const invoices = Store.all('reservationInvoices').slice().sort((a,b)=>(b.date||'').localeCompare(a.date||''));
+    qs('#content').innerHTML = `
+      <div class="table-wrap"><table class="t">
+        <thead><tr><th>Invoice</th><th>Customer</th><th>Date</th><th>Reservations</th><th class="num">Total</th><th class="num">Balance</th><th></th></tr></thead>
+        <tbody>
+        ${invoices.length ? invoices.map(inv=>{
+          const cust = Store.find('customers', inv.customerId);
+          const balance = Posting.reservationInvoiceBalance(inv);
+          return `<tr><td class="mono">${esc(inv.invoiceNo)}</td><td>${esc(cust?cust.name:'—')}</td><td>${fmtDate(inv.date)}</td><td>${inv.reservationIds.length}</td>
+            <td class="num">${fmtMoney(inv.total)}</td><td class="num">${balance>0.004?fmtMoney(balance):'<span class="badge badge-green small">Paid</span>'}</td>
+            <td class="row-actions"><button class="btn btn-sm" data-view="${inv.id}">Open</button></td></tr>`;
+        }).join('') : `<tr><td colspan="7" class="table-empty">No reservation invoices yet.</td></tr>`}
+        </tbody>
+      </table></div>
+    `;
+    qsa('[data-view]').forEach(b=>b.addEventListener('click', ()=>Router.navigate('resinvoices/'+b.dataset.view)));
+  }
+
+  function resInvoiceDetail(params){
+    const inv = Store.find('reservationInvoices', params.id);
+    if(!inv){ setPageTitle('Invoice', 'Bookings'); qs('#content').innerHTML = `<div class="empty-state card"><h3>Invoice not found</h3></div>`; return; }
+    const cust = Store.find('customers', inv.customerId);
+    const balance = Posting.reservationInvoiceBalance(inv);
+    const receipts = Store.where('receipts', r=>(r.allocations||[]).some(a=>a.reservationInvoiceId===inv.id));
+    setPageTitle(inv.invoiceNo, 'Bookings');
+    renderNav();
+    qs('#content').innerHTML = `
+      <div class="card mb-16"><div class="pad">
+        <div class="flex-between"><h2>${esc(inv.invoiceNo)}</h2>${balance>0.004?`<button class="btn btn-primary" id="inv-collect">Collect payment</button>`:'<span class="badge badge-green">Paid in full</span>'}</div>
+        <div class="grid grid-3 mt-8">
+          <div><div class="small muted">Customer</div><div>${esc(cust?cust.name:'—')}</div></div>
+          <div><div class="small muted">Date</div><div>${fmtDate(inv.date)}</div></div>
+          <div><div class="small muted">Balance due</div><div><strong>${fmtMoney(balance)}</strong></div></div>
+        </div>
+      </div></div>
+      <div class="card mb-16">
+        <div class="card-head"><h2>Reservations on this invoice</h2></div>
+        <div class="table-wrap"><table class="t">
+          <thead><tr><th>Reservation</th><th class="num">Room</th><th class="num">Extras</th><th class="num">Amount</th></tr></thead>
+          <tbody>
+          ${inv.lines.map(l=>`<tr><td><a href="#/reservations/${l.reservationId}">${esc(l.reservationNo)}</a></td><td class="num">${fmtMoney(l.roomAmount)}</td><td class="num">${fmtMoney(l.extrasAmount)}</td><td class="num">${fmtMoney(l.amount)}</td></tr>`).join('')}
+          <tr><td colspan="3" style="text-align:right;font-weight:700">Subtotal</td><td class="num">${fmtMoney(inv.subTotal)}</td></tr>
+          <tr><td colspan="3" style="text-align:right;font-weight:700">Tax</td><td class="num">${fmtMoney(inv.tax)}</td></tr>
+          <tr class="report-total"><td colspan="3" style="text-align:right;font-weight:700">Total</td><td class="num">${fmtMoney(inv.total)}</td></tr>
+          </tbody>
+        </table></div>
+      </div>
+      <div class="card">
+        <div class="card-head"><h2>Payments</h2></div>
+        <div class="table-wrap"><table class="t">
+          <thead><tr><th>Receipt #</th><th>Date</th><th>Method</th><th class="num">Amount</th></tr></thead>
+          <tbody>
+          ${receipts.length ? receipts.map(r=>`<tr><td>${esc(r.receiptNo)}</td><td>${fmtDate(r.date)}</td><td>${esc(CashModule.methodLabel(r.method))}</td><td class="num">${fmtMoney((r.allocations||[]).find(a=>a.reservationInvoiceId===inv.id)?.amount||0)}</td></tr>`).join('')
+            : `<tr><td colspan="4" class="table-empty">No payments recorded yet.</td></tr>`}
+          </tbody>
+        </table></div>
+      </div>
+    `;
+    if(qs('#inv-collect')) qs('#inv-collect').addEventListener('click', ()=>openCollectInvoicePaymentForm(inv, ()=>resInvoiceDetail(params)));
+  }
+
+  /* ---------------- AGENT INVOICING (bundle several stays into one invoice) ---------------- */
+  function renderAgentInvoicing(){
+    setPageTitle('Agent invoicing', 'Finance');
+    renderNav();
+    const agents = Store.all('customers').filter(c=>c.type==='AGENT' && c.active!==false);
+    qs('#content').innerHTML = `
+      <div class="card mb-16"><div class="pad">
+        <label class="field" style="max-width:360px"><span>Agent</span>
+          <select id="ai-agent"><option value="">Select an agent…</option>${agents.map(a=>`<option value="${a.id}">${esc(a.name)}</option>`).join('')}</select>
+        </label>
+      </div></div>
+      <div id="ai-body"></div>
+    `;
+    qs('#ai-agent').addEventListener('change', ()=>renderAgentInvoicingBody(qs('#ai-agent').value));
+  }
+
+  function renderAgentInvoicingBody(agentId){
+    const body = qs('#ai-body');
+    if(!agentId){ body.innerHTML = ''; return; }
+    const agent = Store.find('customers', agentId);
+    const unbilled = Store.where('reservations', r=>r.customerId===agentId && r.status==='CHECKED_OUT' && !r.reservationInvoiceId);
+    if(!unbilled.length){
+      body.innerHTML = `<div class="card"><div class="pad"><p class="hint">${esc(agent.name)} has no checked-out, uninvoiced reservations right now.</p></div></div>`;
+      return;
+    }
+    const total = Ledger.round2(unbilled.reduce((s,r)=>s+roomTotalFor(r)+extrasTotalFor(r),0));
+    body.innerHTML = `
+      <div class="card">
+        <div class="pad">
+          <div class="flex-between mb-8"><h3 style="margin:0">${esc(agent.name)} — unbilled reservations</h3><span class="muted small">${unbilled.length} selectable</span></div>
+          <div class="table-wrap"><table class="t">
+            <thead><tr><th></th><th>Reservation</th><th>Room</th><th>Stay</th><th class="num">Amount</th></tr></thead>
+            <tbody>
+            ${unbilled.map(r=>{
+              const room = Store.find('rooms', r.roomId);
+              const amount = Ledger.round2(roomTotalFor(r)+extrasTotalFor(r));
+              return `<tr><td><input type="checkbox" class="ai-pick" value="${r.id}" checked></td><td class="mono">${esc(r.reservationNo)}</td><td>${esc(room?room.number:'—')}</td>
+                <td>${fmtDate(r.checkIn)} – ${fmtDate(r.checkOut)}</td><td class="num">${fmtMoney(amount)}</td></tr>`;
+            }).join('')}
+            </tbody>
+          </table></div>
+          <div class="flex-between mt-12">
+            <span id="ai-selsum" class="mono">${unbilled.length} selected · ${fmtMoney(total)}</span>
+            <button class="btn btn-primary" id="ai-generate">Generate invoice</button>
+          </div>
+        </div>
+      </div>
+    `;
+    function recompute(){
+      const picked = qsa('.ai-pick:checked').map(c=>c.value);
+      const sum = Ledger.round2(unbilled.filter(r=>picked.includes(r.id)).reduce((s,r)=>s+roomTotalFor(r)+extrasTotalFor(r),0));
+      qs('#ai-selsum').textContent = `${picked.length} selected · ${fmtMoney(sum)}`;
+    }
+    qsa('.ai-pick').forEach(c=>c.addEventListener('change', recompute));
+    qs('#ai-generate').addEventListener('click', ()=>{
+      const picked = qsa('.ai-pick:checked').map(c=>c.value);
+      if(!picked.length){ toast('Select at least one reservation.', 'err'); return; }
+      try{
+        const inv = Posting.postReservationsInvoice(picked);
+        toast('Invoice generated', 'ok');
+        Router.navigate('resinvoices/'+inv.id);
+      }catch(e){ toast(e.message, 'err'); }
+    });
+  }
+
+  /* ---------------- OUTSTANDING BALANCES (pay oldest-first) ---------------- */
+  function renderOutstanding(){
+    setPageTitle('Outstanding balances', 'Finance');
+    renderNav();
+    const customers = Store.all('customers').filter(c=>c.active!==false &&
+      Store.all('reservationInvoices').some(inv=>inv.customerId===c.id));
+    qs('#content').innerHTML = `
+      <div class="card mb-16"><div class="pad">
+        <label class="field" style="max-width:360px"><span>Customer</span>
+          <select id="ob-customer"><option value="">Select…</option>${customers.map(c=>`<option value="${c.id}">${esc(c.name)}${c.type==='AGENT'?' (agent)':''}</option>`).join('')}</select>
+        </label>
+      </div></div>
+      <div id="ob-body"></div>
+    `;
+    qs('#ob-customer').addEventListener('change', ()=>renderOutstandingBody(qs('#ob-customer').value));
+  }
+
+  function renderOutstandingBody(customerId){
+    const body = qs('#ob-body');
+    if(!customerId){ body.innerHTML = ''; return; }
+    const cust = Store.find('customers', customerId);
+    const invoices = Store.where('reservationInvoices', inv=>inv.customerId===customerId)
+      .map(inv=>({ inv, balance: Posting.reservationInvoiceBalance(inv) }))
+      .filter(x=>x.balance>0.004)
+      .sort((a,b)=>(a.inv.date||'').localeCompare(b.inv.date||''));
+    if(!invoices.length){
+      body.innerHTML = `<div class="card"><div class="pad"><p class="hint"><span class="badge badge-green small">Settled</span> ${esc(cust.name)} is fully settled — no unpaid invoices on file.</p></div></div>`;
+      return;
+    }
+    const totalOwed = Ledger.round2(invoices.reduce((s,x)=>s+x.balance,0));
+    body.innerHTML = `
+      <div class="card"><div class="pad">
+        <div class="flex-between mb-8"><h3 style="margin:0">${esc(cust.name)} — unpaid invoices</h3><button class="btn btn-primary btn-sm" id="ob-collect">Collect payment</button></div>
+        <div class="table-wrap"><table class="t">
+          <thead><tr><th>Invoice</th><th>Date</th><th class="num">Total</th><th class="num">Balance</th></tr></thead>
+          <tbody>
+          ${invoices.map(({inv,balance})=>`<tr><td><a href="#/resinvoices/${inv.id}">${esc(inv.invoiceNo)}</a></td><td>${fmtDate(inv.date)}</td><td class="num">${fmtMoney(inv.total)}</td><td class="num" style="font-weight:700">${fmtMoney(balance)}</td></tr>`).join('')}
+          <tr><td colspan="3" style="text-align:right;font-weight:800">Total outstanding</td><td class="num" style="font-weight:800">${fmtMoney(totalOwed)}</td></tr>
+          </tbody>
+        </table></div>
+        <p class="hint mt-8">A payment here is applied across these invoices oldest-first, automatically.</p>
+      </div></div>
+    `;
+    qs('#ob-collect').addEventListener('click', ()=>{
+      openModal({
+        title:'Collect payment — '+cust.name,
+        bodyHtml: `
+          <dl class="kv mb-16"><dt>Total outstanding</dt><dd>${fmtMoney(totalOwed)}</dd></dl>
+          <div class="form-row">
+            <div class="field"><label>Settle via</label><select id="obp-method">${(Store.settings.paymentMethods||[]).map(m=>`<option value="${m.id}">${esc(m.label)}</option>`).join('')}</select></div>
+            <div class="field"><label>Date</label><input id="obp-date" type="date" value="${todayISO()}"></div>
+          </div>
+          <div class="field"><label>Amount</label><input id="obp-amount" type="number" min="0.01" step="0.01" value="${totalOwed.toFixed(2)}"></div>
+        `,
+        footerHtml: `<button class="btn" data-close>Cancel</button><button class="btn btn-primary" id="obp-save">Record payment</button>`,
+        onMount(modal){
+          qs('#obp-save', modal).addEventListener('click', ()=>{
+            const amount = parseFloat(qs('#obp-amount', modal).value);
+            if(!amount || amount<=0){ toast('Enter an amount.', 'err'); return; }
+            try{
+              const result = Posting.collectReservationPayment(customerId, amount, qs('#obp-method', modal).value, qs('#obp-date', modal).value||todayISO());
+              closeModal();
+              toast(result.clamped ? `Amount clamped to the ${fmtMoney(result.totalOwed)} outstanding.` : 'Payment recorded', 'ok');
+              renderOutstandingBody(customerId);
+            }catch(e){ toast(e.message, 'err'); }
+          });
+        }
+      });
     });
   }
 
@@ -5942,9 +6372,9 @@ window.Posting = Posting;
     const rooms = Store.all('rooms').slice().sort((a,b)=>(a.number||'').localeCompare(b.number||'', undefined, {numeric:true}));
 
     function resRow(r){
-      const guest = Store.find('guests', r.guestId);
+      const primary = Store.find('guests', (r.guests&&r.guests[0]||{}).guestId);
       const room = Store.find('rooms', r.roomId);
-      return `<tr><td class="mono">${esc(r.reservationNo)}</td><td>${esc(guest?guest.name:'—')}</td><td>${esc(room?room.number:'—')}</td>
+      return `<tr><td class="mono">${esc(r.reservationNo)}</td><td>${esc(primary?primary.name:'—')}</td><td>${esc(room?room.number:'—')}</td>
         <td class="row-actions"><button class="btn btn-sm" data-goto="${r.id}">Open</button></td></tr>`;
     }
 
@@ -5986,8 +6416,148 @@ window.Posting = Posting;
   }
 
   Router.on('/reservations', render);
+  Router.on('/resinvoices', renderResInvoices);
+  Router.on('/resinvoicing', renderAgentInvoicing);
+  Router.on('/resoutstanding', renderOutstanding);
   Router.on('/frontdesk', renderFrontDesk);
-  window.ReservationsModule = { openCollectPaymentForm, balanceInfo };
+  window.ReservationsModule = { openCollectInvoicePaymentForm, invoiceFor, pendingTickets, roomTotalFor, extrasTotalFor };
+})();
+
+
+/* ---- modules/postickets.js ---- */
+/* ---------------------------------------------------------------------
+   postickets.js — Guesthouse incidental charges (restaurant, minibar,
+   spa) tied to an in-house or recently-checked-out reservation. A
+   ticket can be "settled at table" — paid on the spot, posting its own
+   small receipt straight to Extras & Other Charges, independent of any
+   room folio — or left unpaid, in which case it quietly becomes a real
+   extras line on its reservation's folio the moment that guest checks
+   out (see reservations.js), the same way a restaurant tab lands on a
+   hotel bill if it's never settled separately. Either way, a paid
+   ticket never appears twice: it drops out of the next agent invoice
+   run because it was never added to the folio at all.
+--------------------------------------------------------------------- */
+
+(function(){
+
+  function statusBadge(status){
+    return status==='PAID' ? '<span class="badge badge-green">Paid</span>'
+      : status==='BILLED' ? '<span class="badge badge-gray">Billed to room</span>'
+      : '<span class="badge badge-amber">Unpaid</span>';
+  }
+
+  function ticketTotal(items){ return Ledger.round2((items||[]).reduce((s,i)=>s+(i.amount||0),0)); }
+
+  function render(){
+    setPageTitle('POS tickets', 'Bookings');
+    renderNav();
+    const vo = Auth.isViewOnly();
+    const tickets = Store.all('posTickets').slice().sort((a,b)=>(b.createdAt||'').localeCompare(a.createdAt||''));
+    qs('#content').innerHTML = `
+      <div class="toolbar"><div class="spacer"></div>${vo?'':`<button class="btn btn-primary" id="pt-add">+ New ticket</button>`}</div>
+      <div class="table-wrap"><table class="t">
+        <thead><tr><th>Ticket</th><th>Room / guest</th><th>Items</th><th class="num">Total</th><th>Status</th><th></th></tr></thead>
+        <tbody>
+        ${tickets.length ? tickets.map(t=>{
+          const res = Store.find('reservations', t.reservationId);
+          const room = res ? Store.find('rooms', res.roomId) : null;
+          const guest = Store.find('guests', t.guestId);
+          return `<tr><td class="mono">${esc(t.ticketNo)}</td>
+            <td>${esc(room?room.number:'—')}${guest?' · '+esc(guest.name):''}</td>
+            <td>${esc((t.items||[]).map(i=>i.description).join(', '))}</td>
+            <td class="num">${fmtMoney(t.total)}</td>
+            <td>${statusBadge(t.status)}</td>
+            <td class="row-actions">${(t.status==='UNPAID' && !vo)?`<button class="btn btn-sm" data-pay="${t.id}">Mark paid</button>`:''}</td></tr>`;
+        }).join('') : `<tr><td colspan="6" class="table-empty">No POS tickets yet.</td></tr>`}
+        </tbody>
+      </table></div>
+    `;
+    if(qs('#pt-add')) qs('#pt-add').addEventListener('click', openTicketForm);
+    qsa('[data-pay]').forEach(b=>b.addEventListener('click', ()=>openPayForm(Store.find('posTickets', b.dataset.pay))));
+  }
+
+  function openTicketForm(){
+    const openReservations = Store.where('reservations', r=>['CHECKED_IN','CHECKED_OUT'].includes(r.status));
+    if(!openReservations.length){ toast('No checked-in (or just checked-out) reservations to charge.', 'err'); return; }
+    openModal({
+      title:'New POS ticket', size:'lg',
+      bodyHtml: `
+        <div class="field"><label>Reservation</label>
+          <select id="pt-res">${openReservations.map(r=>{
+            const room = Store.find('rooms', r.roomId);
+            return `<option value="${r.id}">${esc(r.reservationNo)} — Room ${esc(room?room.number:'?')}</option>`;
+          }).join('')}</select>
+        </div>
+        <div class="field"><label>Guest <span class="hint">(optional)</span></label><select id="pt-guest"></select></div>
+        <div id="pt-items"></div>
+        <button class="btn btn-sm" id="pt-add-item" type="button">+ Add item</button>
+        <div class="flex-between mt-12"><span class="mono" id="pt-total">Total: ${fmtMoney(0)}</span></div>
+      `,
+      footerHtml: `<button class="btn" data-close>Cancel</button><button class="btn btn-primary" id="pt-save">Create ticket</button>`,
+      onMount(modal){
+        const resSel = qs('#pt-res', modal), guestSel = qs('#pt-guest', modal), itemsWrap = qs('#pt-items', modal), totalEl = qs('#pt-total', modal);
+        function refreshGuests(){
+          const res = Store.find('reservations', resSel.value);
+          const guests = (res&&res.guests||[]).map(gl=>Store.find('guests', gl.guestId)).filter(Boolean);
+          guestSel.innerHTML = `<option value="">—</option>` + guests.map(g=>`<option value="${g.id}">${esc(g.name)}</option>`).join('');
+        }
+        function addItemRow(){
+          const row = document.createElement('div');
+          row.className = 'form-row pt-item-row';
+          row.innerHTML = `<div class="field"><label>Description</label><input type="text" class="pt-item-desc" placeholder="e.g. Minibar, Dinner (2)"></div>
+            <div class="field"><label>Amount</label><input type="number" min="0.01" step="0.01" class="pt-item-amt"></div>
+            <button type="button" class="btn btn-sm btn-ghost pt-item-del" style="align-self:end">Remove</button>`;
+          itemsWrap.appendChild(row);
+          row.querySelector('.pt-item-del').addEventListener('click', ()=>{ row.remove(); recalc(); });
+          row.querySelector('.pt-item-amt').addEventListener('input', recalc);
+        }
+        function recalc(){
+          const total = qsa('.pt-item-amt', itemsWrap).reduce((s,i)=>s+(parseFloat(i.value)||0),0);
+          totalEl.textContent = 'Total: '+fmtMoney(Ledger.round2(total));
+        }
+        resSel.addEventListener('change', refreshGuests);
+        qs('#pt-add-item', modal).addEventListener('click', addItemRow);
+        refreshGuests(); addItemRow();
+
+        qs('#pt-save', modal).addEventListener('click', ()=>{
+          const items = qsa('.pt-item-row', itemsWrap).map(row=>({
+            description: row.querySelector('.pt-item-desc').value.trim(),
+            amount: Ledger.round2(parseFloat(row.querySelector('.pt-item-amt').value)||0)
+          })).filter(i=>i.description && i.amount>0);
+          if(!items.length){ toast('Add at least one item with a description and amount.', 'err'); return; }
+          const total = ticketTotal(items);
+          Store.insert('posTickets', {
+            ticketNo: Store.docNo('POS','posTicket'), reservationId: resSel.value, guestId: guestSel.value||null,
+            items, total, status:'UNPAID'
+          });
+          closeModal(); toast('Ticket created', 'ok'); render();
+        });
+      }
+    });
+  }
+
+  function openPayForm(ticket){
+    if(!ticket) return;
+    const methods = Store.settings.paymentMethods||[];
+    openModal({
+      title:'Mark ticket paid',
+      bodyHtml: `
+        <dl class="kv mb-16"><dt>Ticket</dt><dd>${esc(ticket.ticketNo)}</dd><dt>Total</dt><dd>${fmtMoney(ticket.total)}</dd></dl>
+        <div class="field"><label>Settled via</label><select id="ptp-method">${methods.map(m=>`<option value="${m.id}">${esc(m.label)}</option>`).join('')}</select></div>
+      `,
+      footerHtml: `<button class="btn" data-close>Cancel</button><button class="btn btn-primary" id="ptp-save">Mark paid</button>`,
+      onMount(modal){
+        qs('#ptp-save', modal).addEventListener('click', ()=>{
+          try{ Posting.postPosTicketPayment(ticket, qs('#ptp-method', modal).value); }
+          catch(e){ toast(e.message, 'err'); return; }
+          closeModal(); toast('Ticket marked paid', 'ok'); render();
+        });
+      }
+    });
+  }
+
+  Router.on('/postickets', render);
+  window.PosTicketsModule = { statusBadge, ticketTotal };
 })();
 
 
@@ -9945,6 +10515,8 @@ const NAV = [
     {path:'/kiosk', label:'Kiosk (waiver)', ed:'front', biz:'TRIP_BASED'},
     {path:'/frontdesk', label:'Front desk', ed:'front', biz:'ROOM_BASED'},
     {path:'/reservations', label:'Reservations', ed:'front', biz:'ROOM_BASED'},
+    {path:'/postickets', label:'POS tickets', ed:'front', biz:'ROOM_BASED'},
+    {path:'/resinvoices', label:'Reservation invoices', ed:'front', biz:'ROOM_BASED'},
   ]},
   { group:'Directory', icon:'directory', items:[
     {path:'/customers', label:'Customers (agents)', ed:'front'},
@@ -9961,6 +10533,8 @@ const NAV = [
   ]},
   { group:'Finance', icon:'finance', items:[
     {path:'/receipts', label:'Receipts', ed:'front'},
+    {path:'/resinvoicing', label:'Agent invoicing', ed:'front', biz:'ROOM_BASED'},
+    {path:'/resoutstanding', label:'Outstanding balances', ed:'front', biz:'ROOM_BASED'},
     {path:'/dayend', label:'Day-end close', ed:'back'},
     {path:'/deposits', label:'Deposits', ed:'back'},
     {path:'/reconcile', label:'Reconciliation', ed:'back'},
