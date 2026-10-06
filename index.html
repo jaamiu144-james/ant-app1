@@ -316,6 +316,17 @@ input.qty-inline{padding:3px 4px;font-size:13px}
 .inline-list{display:flex;flex-direction:column;gap:8px}
 .inline-item{display:flex;align-items:center;gap:8px;padding:8px 10px;border:1px solid var(--line);border-radius:8px;background:#faf9f4}
 .inline-item .grow{flex:1}
+.roomgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(64px,1fr));gap:8px}
+.roomcell{border-radius:8px;padding:8px 6px;text-align:center;font-size:11.5px;font-weight:600;line-height:1.3}
+.roomcell .num{font-size:14px;font-weight:700;display:block}
+.roomcell.rc-occupied{background:var(--danger-tint);color:var(--danger)}
+.roomcell.rc-clean{background:var(--success-tint);color:var(--success)}
+.roomcell.rc-dirty{background:var(--warning-tint);color:var(--warning)}
+.roomcell.rc-oos{background:#eeece2;color:var(--muted-2)}
+.feed{display:flex;flex-direction:column;gap:10px}
+.feed .item{display:flex;gap:10px;font-size:12.5px}
+.feed .item .dot{width:7px;height:7px;border-radius:50%;background:var(--teal);margin-top:5px;flex-shrink:0}
+.feed .item .when{color:var(--muted-2);font-size:11px}
 @media print{
   .topbar,.sidebar,.toolbar,.row-actions,.no-print,.split-list{display:none !important}
   .content{max-width:100%;padding:0}
@@ -589,6 +600,7 @@ const COLLECTIONS = [
   'boats','staff','tripTemplates','trips','closures',
   'bookings','salesInvoices',
   'roomTypes','rooms','reservations','reservationInvoices','posTickets',
+  'inventoryItems','inventoryTxns','housekeepingTasks','pricingRules','channels',
   'receipts','vouchers','bills',
   'pettyCashConfig', // legacy single object — kept only so old saves migrate cleanly; unused by new code
   'pettyCashFloats',
@@ -2633,11 +2645,14 @@ window.Posting = Posting;
         <div class="card">
           <div class="card-head"><h2>Profile</h2></div>
           <dl class="kv">
+            <dt>Gender</dt><dd>${esc(g.gender||'—')}</dd>
             <dt>Passport / ID</dt><dd>${esc(g.passportNo||'—')}</dd>
             <dt>Nationality</dt><dd>${esc(g.nationality||'—')}</dd>
             <dt>Date of birth</dt><dd>${g.dob?fmtDate(g.dob):'—'}</dd>
             <dt>Phone</dt><dd>${esc(g.phone||'—')}</dd>
             <dt>Email</dt><dd>${esc(g.email||'—')}</dd>
+            <dt>Address</dt><dd>${esc(g.address||'—')}</dd>
+            <dt>TIN</dt><dd>${esc(g.taxId||'—')}</dd>
           </dl>
         </div>
         <div class="card">
@@ -2679,16 +2694,28 @@ window.Posting = Posting;
       bodyHtml: `
         <div class="form-row">
           <div class="field"><label>Full name</label><input id="gf-name" type="text" value="${esc(existing?existing.name:'')}"></div>
-          <div class="field"><label>Passport / ID number</label><input id="gf-pass" type="text" value="${esc(existing?existing.passportNo:'')}"></div>
+          <div class="field"><label>Gender</label>
+            <select id="gf-gender">
+              <option value="" ${!existing||!existing.gender?'selected':''}>— unspecified —</option>
+              <option value="Female" ${existing&&existing.gender==='Female'?'selected':''}>Female</option>
+              <option value="Male" ${existing&&existing.gender==='Male'?'selected':''}>Male</option>
+              <option value="Other" ${existing&&existing.gender==='Other'?'selected':''}>Other</option>
+            </select>
+          </div>
         </div>
         <div class="form-row">
+          <div class="field"><label>Passport / ID number</label><input id="gf-pass" type="text" value="${esc(existing?existing.passportNo:'')}"></div>
           <div class="field"><label>Nationality</label><input id="gf-nat" type="text" value="${esc(existing?existing.nationality:'')}"></div>
+        </div>
+        <div class="form-row">
           <div class="field"><label>Date of birth</label><input id="gf-dob" type="date" value="${existing&&existing.dob?existing.dob:''}"></div>
+          <div class="field"><label>TIN <span class="hint">(tax ID, if known)</span></label><input id="gf-tin" type="text" value="${esc(existing?existing.taxId:'')}"></div>
         </div>
         <div class="form-row">
           <div class="field"><label>Phone</label><input id="gf-phone" type="text" value="${esc(existing?existing.phone:'')}"></div>
           <div class="field"><label>Email</label><input id="gf-email" type="email" value="${esc(existing?existing.email:'')}"></div>
         </div>
+        <div class="field"><label>Address</label><input id="gf-addr" type="text" value="${esc(existing?existing.address:'')}" placeholder="Street, city, country"></div>
         <div class="section-title">Diving</div>
         <div class="form-row">
           <div class="field"><label>Certification level</label>
@@ -2711,8 +2738,9 @@ window.Posting = Posting;
           if(!name){ toast('Enter a name.', 'err'); return; }
           const waiverDate = qs('#gf-waiver').value;
           const data = {
-            name, passportNo: qs('#gf-pass').value.trim(), nationality: qs('#gf-nat').value.trim(),
-            dob: qs('#gf-dob').value||null, phone: qs('#gf-phone').value.trim(), email: qs('#gf-email').value.trim(),
+            name, gender: qs('#gf-gender').value||null, passportNo: qs('#gf-pass').value.trim(), nationality: qs('#gf-nat').value.trim(),
+            dob: qs('#gf-dob').value||null, taxId: qs('#gf-tin').value.trim(), phone: qs('#gf-phone').value.trim(), email: qs('#gf-email').value.trim(),
+            address: qs('#gf-addr').value.trim(),
             certLevel: qs('#gf-cert').value.trim(), certAgency: qs('#gf-agency').value.trim(), certNo: qs('#gf-certno').value.trim(),
             medicalDate: qs('#gf-med').value||null, waiverSigned: !!waiverDate, waiverDate: waiverDate||null,
             notes: qs('#gf-notes').value.trim(), active:true
@@ -5587,6 +5615,7 @@ window.Posting = Posting;
     renderNav();
     const tab = params.sub || 'rooms';
     qs('#content').innerHTML = `
+      <div class="toolbar"><div class="spacer"></div><button class="btn btn-sm" id="rm-preview-book">Preview online booking site &rarr;</button></div>
       <div class="tabs">
         <div class="tab ${tab==='rooms'?'active':''}" data-tab="rooms">Rooms</div>
         <div class="tab ${tab==='types'?'active':''}" data-tab="types">Room types</div>
@@ -5594,6 +5623,7 @@ window.Posting = Posting;
       <div id="rm-body"></div>
     `;
     qsa('[data-tab]').forEach(t=>t.addEventListener('click', ()=>Router.navigate('rooms/x/'+t.dataset.tab)));
+    if(qs('#rm-preview-book')) qs('#rm-preview-book').addEventListener('click', ()=>{ location.hash = '/book'; });
     if(tab==='types') renderTypes(); else renderRooms();
   }
 
@@ -5856,12 +5886,18 @@ window.Posting = Posting;
         const ciInp = qs('#rf-checkin', modal), coInp = qs('#rf-checkout', modal), availNote = qs('#rf-avail', modal);
         function refreshRooms(){
           const type = Store.find('roomTypes', typeSel.value);
-          rateInp.value = type ? type.nightlyRate : 0;
           const checkIn = ciInp.value, checkOut = coInp.value;
+          let suggested = type ? type.nightlyRate : 0, applied = [];
+          if(type && checkIn && window.DynamicPricingModule){
+            const q = DynamicPricingModule.quote(type.id, checkIn, type.nightlyRate);
+            suggested = q.rate; applied = q.appliedRules;
+          }
+          rateInp.value = suggested;
           if(!checkIn || !checkOut || checkOut<=checkIn){ roomSel.innerHTML = ''; availNote.textContent = 'Check-out must be after check-in.'; return; }
           const rooms = availableRooms(typeSel.value, checkIn, checkOut, null);
           roomSel.innerHTML = rooms.map(r=>`<option value="${r.id}">${esc(r.number)}${r.name?' — '+esc(r.name):''}</option>`).join('');
-          availNote.textContent = rooms.length ? `${rooms.length} room(s) of this type free for these dates.` : 'No rooms of this type are free for these dates.';
+          const availText = rooms.length ? `${rooms.length} room(s) of this type free for these dates.` : 'No rooms of this type are free for these dates.';
+          availNote.textContent = applied.length ? `${availText} Rate adjusted by dynamic pricing: ${applied.map(a=>a.summary).join('; ')}.` : availText;
         }
         typeSel.addEventListener('change', refreshRooms);
         ciInp.addEventListener('change', refreshRooms);
@@ -6015,6 +6051,7 @@ window.Posting = Posting;
       });
       Store.update('reservations', res.id, { extras, status:'CHECKED_OUT' });
       Store.update('rooms', res.roomId, { status:'VACANT_DIRTY' });
+      if(window.HousekeepingModule) HousekeepingModule.ensureCleaningTask(res.roomId, res.id);
       const fresh = Store.find('reservations', res.id);
       const cust = Store.find('customers', fresh.customerId);
       if(cust && cust.type!=='AGENT'){
@@ -6558,6 +6595,751 @@ window.Posting = Posting;
 
   Router.on('/postickets', render);
   window.PosTicketsModule = { statusBadge, ticketTotal };
+})();
+
+
+/* ---- modules/inventory.js ---- */
+/* ---------------------------------------------------------------------
+   inventory.js — Guesthouse stock tracking: housekeeping/amenity supplies
+   (towels, toiletries, cleaning chemicals) and anything else kept on a
+   shelf. Mirrors equipment.js's "receive stock" pattern but for
+   consumable quantities rather than serialized/tagged items — a single
+   item record just carries a running qtyOnHand, adjusted by dated
+   inventoryTxns (RECEIVE / CONSUME / ADJUST) rather than a full ledger.
+   housekeeping.js calls InventoryModule.consume() when a cleaning task
+   uses up stock.
+--------------------------------------------------------------------- */
+
+(function(){
+
+  function lowStock(item){ return (item.qtyOnHand||0) <= (item.reorderLevel||0); }
+
+  function render(){
+    setPageTitle('Inventory', 'Operations');
+    renderNav();
+    const vo = Auth.isViewOnly();
+    const items = Store.all('inventoryItems').slice().sort((a,b)=>a.name.localeCompare(b.name));
+    qs('#content').innerHTML = `
+      <div class="toolbar">
+        <div class="spacer"></div>
+        ${vo?'':`<button class="btn" id="inv-adjust">+ Receive / adjust stock</button><button class="btn btn-primary" id="inv-add">+ Add item</button>`}
+      </div>
+      <div class="table-wrap"><table class="t">
+        <thead><tr><th>Item</th><th>Unit</th><th class="num">On hand</th><th class="num">Reorder level</th><th>Status</th><th></th></tr></thead>
+        <tbody>
+        ${items.length ? items.map(i=>`<tr>
+            <td><strong>${esc(i.name)}</strong>${i.notes?`<div class="small muted">${esc(i.notes)}</div>`:''}</td>
+            <td>${esc(i.unit||'—')}</td>
+            <td class="num mono">${i.qtyOnHand||0}</td>
+            <td class="num mono">${i.reorderLevel||0}</td>
+            <td>${lowStock(i)?'<span class="badge badge-amber">Low stock</span>':'<span class="badge badge-green">OK</span>'}</td>
+            <td class="row-actions">${vo?'':`<button class="btn btn-sm" data-edit="${i.id}">Edit</button>`}</td>
+          </tr>`).join('') : `<tr><td colspan="6" class="table-empty">No inventory items yet. Add towels, toiletries, cleaning supplies — whatever housekeeping uses.</td></tr>`}
+        </tbody>
+      </table></div>
+      <div class="card mt-16">
+        <div class="card-head"><h2>Recent stock movements</h2></div>
+        ${renderTxnTable()}
+      </div>
+    `;
+    if(qs('#inv-add')) qs('#inv-add').addEventListener('click', ()=>openItemForm());
+    if(qs('#inv-adjust')) qs('#inv-adjust').addEventListener('click', ()=>openAdjustForm());
+    qsa('[data-edit]').forEach(b=>b.addEventListener('click', ()=>openItemForm(Store.find('inventoryItems', b.dataset.edit))));
+  }
+
+  function renderTxnTable(){
+    const txns = Store.all('inventoryTxns').slice().sort((a,b)=>(b.createdAt||'').localeCompare(a.createdAt||'')).slice(0,10);
+    if(!txns.length) return `<p class="muted small">No stock movements recorded yet.</p>`;
+    return `<div class="table-wrap"><table class="t">
+      <thead><tr><th>Date</th><th>Item</th><th>Type</th><th class="num">Qty</th><th>Note</th></tr></thead>
+      <tbody>${txns.map(t=>{
+        const item = Store.find('inventoryItems', t.itemId);
+        const typeLabel = t.type==='RECEIVE' ? '<span class="badge badge-green">Received</span>' : t.type==='CONSUME' ? '<span class="badge badge-teal">Consumed</span>' : '<span class="badge badge-gray">Adjusted</span>';
+        return `<tr><td>${fmtDateTime(t.createdAt)}</td><td>${esc(item?item.name:'—')}</td><td>${typeLabel}</td><td class="num mono">${t.qty>0?'+':''}${t.qty}</td><td class="small muted">${esc(t.note||'')}</td></tr>`;
+      }).join('')}</tbody>
+    </table></div>`;
+  }
+
+  function openItemForm(existing){
+    openModal({
+      title: existing ? 'Edit item' : 'Add inventory item',
+      bodyHtml: `
+        <div class="field"><label>Item name</label><input id="if-name" type="text" placeholder="e.g. Bath towels, Shampoo sachets" value="${esc(existing?existing.name:'')}"></div>
+        <div class="form-row">
+          <div class="field"><label>Unit</label><input id="if-unit" type="text" placeholder="e.g. pcs, bottles, rolls" value="${esc(existing?existing.unit:'')}"></div>
+          <div class="field"><label>Reorder level</label><input id="if-reorder" type="number" min="0" step="1" value="${existing?(existing.reorderLevel||0):0}"></div>
+        </div>
+        ${!existing ? `<div class="field"><label>Opening quantity on hand</label><input id="if-opening" type="number" min="0" step="1" value="0"></div>` : ''}
+        <div class="field"><label>Notes</label><textarea id="if-notes">${esc(existing?existing.notes:'')}</textarea></div>
+      `,
+      footerHtml: `<button class="btn" data-close>Cancel</button><button class="btn btn-primary" id="if-save">Save</button>`,
+      onMount(){
+        qs('#if-save').addEventListener('click', ()=>{
+          const name = qs('#if-name').value.trim();
+          if(!name){ toast('Enter an item name.', 'err'); return; }
+          const data = { name, unit: qs('#if-unit').value.trim(), reorderLevel: parseInt(qs('#if-reorder').value,10)||0, notes: qs('#if-notes').value.trim() };
+          if(existing) Store.update('inventoryItems', existing.id, data);
+          else {
+            const opening = parseInt(qs('#if-opening').value,10)||0;
+            const item = Store.insert('inventoryItems', Object.assign({ qtyOnHand: opening }, data));
+            if(opening>0) Store.insert('inventoryTxns', { itemId: item.id, type:'RECEIVE', qty: opening, note:'Opening quantity' });
+          }
+          closeModal(); toast('Item saved', 'ok'); render();
+        });
+      }
+    });
+  }
+
+  function openAdjustForm(){
+    const items = Store.all('inventoryItems');
+    if(!items.length){ toast('Add an inventory item first.', 'err'); return; }
+    openModal({
+      title:'Receive / adjust stock',
+      bodyHtml: `
+        <div class="field"><label>Item</label><select id="af-item">${items.map(i=>`<option value="${i.id}">${esc(i.name)} (on hand: ${i.qtyOnHand||0})</option>`).join('')}</select></div>
+        <div class="form-row">
+          <div class="field"><label>Movement</label><select id="af-type"><option value="RECEIVE">Stock received (+)</option><option value="ADJUST">Manual adjustment (+/-)</option></select></div>
+          <div class="field"><label>Quantity</label><input id="af-qty" type="number" step="1" value="0"></div>
+        </div>
+        <div class="field"><label>Note</label><input id="af-note" type="text" placeholder="e.g. delivery invoice #, stock count correction"></div>
+      `,
+      footerHtml: `<button class="btn" data-close>Cancel</button><button class="btn btn-primary" id="af-save">Save</button>`,
+      onMount(){
+        qs('#af-save').addEventListener('click', ()=>{
+          const itemId = qs('#af-item').value;
+          const type = qs('#af-type').value;
+          let qty = parseInt(qs('#af-qty').value,10)||0;
+          if(type==='RECEIVE') qty = Math.abs(qty);
+          if(!qty){ toast('Enter a non-zero quantity.', 'err'); return; }
+          applyTxn(itemId, type, qty, qs('#af-note').value.trim());
+          closeModal(); toast('Stock updated', 'ok'); render();
+        });
+      }
+    });
+  }
+
+  // Shared low-level stock mutation, used by the adjust form above and by
+  // housekeeping.js when a cleaning task consumes supplies. Qty is signed
+  // for ADJUST/CONSUME (consume always recorded as a negative movement);
+  // qtyOnHand is clamped at zero rather than allowed to go negative.
+  function applyTxn(itemId, type, qty, note){
+    const item = Store.find('inventoryItems', itemId);
+    if(!item) return null;
+    const signedQty = type==='CONSUME' ? -Math.abs(qty) : qty;
+    const newQty = Math.max(0, (item.qtyOnHand||0) + signedQty);
+    Store.update('inventoryItems', item.id, { qtyOnHand: newQty });
+    return Store.insert('inventoryTxns', { itemId, type, qty: signedQty, note: note||'' });
+  }
+
+  function consume(itemId, qty, note){
+    return applyTxn(itemId, 'CONSUME', Math.abs(qty), note);
+  }
+
+  Router.on('/inventory', render);
+  window.InventoryModule = { lowStock, consume };
+})();
+
+
+/* ---- modules/housekeeping.js ---- */
+/* ---------------------------------------------------------------------
+   housekeeping.js — Guesthouse task board for turning a room from
+   "vacant — needs cleaning" back to "vacant — clean". A task is created
+   automatically whenever a reservation checks out (see reservations.js,
+   which calls ensureCleaningTask), and staff can also raise one by hand
+   (inspection, maintenance). Completing a cleaning task flips the room
+   back to VACANT_CLEAN and can consume inventory supplies via
+   InventoryModule.consume().
+--------------------------------------------------------------------- */
+
+(function(){
+
+  function typeLabel(t){ return t==='INSPECT' ? 'Inspection' : t==='MAINTENANCE' ? 'Maintenance' : 'Cleaning'; }
+  function statusBadge(s){
+    return s==='DONE' ? '<span class="badge badge-green">Done</span>'
+      : s==='IN_PROGRESS' ? '<span class="badge badge-teal">In progress</span>'
+      : '<span class="badge badge-amber">Pending</span>';
+  }
+
+  // Called from reservations.js at checkout. Avoids piling up duplicate
+  // pending tasks if checkout is somehow triggered twice for the same room.
+  function ensureCleaningTask(roomId, reservationId){
+    const existing = Store.where('housekeepingTasks', t=>t.roomId===roomId && t.status!=='DONE' && t.type==='CLEAN');
+    if(existing.length) return existing[0];
+    return Store.insert('housekeepingTasks', { roomId, reservationId: reservationId||null, type:'CLEAN', status:'PENDING', notes:'', consumedItems:[] });
+  }
+
+  function render(){
+    setPageTitle('Housekeeping', 'Operations');
+    renderNav();
+    const vo = Auth.isViewOnly();
+    const tasks = Store.all('housekeepingTasks').slice().sort((a,b)=>(a.createdAt||'').localeCompare(b.createdAt||''));
+    const pending = tasks.filter(t=>t.status==='PENDING');
+    const inProgress = tasks.filter(t=>t.status==='IN_PROGRESS');
+    const doneToday = tasks.filter(t=>t.status==='DONE' && (t.completedAt||'').slice(0,10)===todayISO())
+      .sort((a,b)=>(b.completedAt||'').localeCompare(a.completedAt||''));
+
+    const col = (title, list, emptyMsg)=> `
+      <div class="card">
+        <div class="card-head"><h2>${title}</h2><span class="badge badge-gray">${list.length}</span></div>
+        ${list.length ? list.map(t=>taskRow(t, vo)).join('') : `<p class="muted small">${emptyMsg}</p>`}
+      </div>`;
+
+    qs('#content').innerHTML = `
+      <div class="toolbar"><div class="spacer"></div>${vo?'':`<button class="btn btn-primary" id="hk-add">+ New task</button>`}</div>
+      <div class="grid grid-3">
+        ${col('Pending', pending, 'No rooms waiting on housekeeping.')}
+        ${col('In progress', inProgress, 'Nothing currently being cleaned.')}
+        ${col('Done today', doneToday, 'Nothing finished yet today.')}
+      </div>
+    `;
+    if(qs('#hk-add')) qs('#hk-add').addEventListener('click', ()=>openTaskForm());
+    qsa('[data-start]').forEach(b=>b.addEventListener('click', ()=>{ Store.update('housekeepingTasks', b.dataset.start, { status:'IN_PROGRESS' }); render(); }));
+    qsa('[data-complete]').forEach(b=>b.addEventListener('click', ()=>openCompleteForm(Store.find('housekeepingTasks', b.dataset.complete))));
+  }
+
+  function taskRow(t, vo){
+    const room = Store.find('rooms', t.roomId);
+    return `<div class="inline-item mb-8">
+      <div class="grow">
+        <div><strong>Room ${esc(room?room.number:'?')}</strong> — ${esc(typeLabel(t.type))}</div>
+        <div class="small muted">${fmtDateTime(t.createdAt)}${t.notes?' · '+esc(t.notes):''}</div>
+      </div>
+      ${statusBadge(t.status)}
+      ${vo?'':`
+        ${t.status==='PENDING'?`<button class="btn btn-sm" data-start="${t.id}">Start</button>`:''}
+        ${t.status==='IN_PROGRESS'?`<button class="btn btn-sm btn-primary" data-complete="${t.id}">Complete</button>`:''}
+      `}
+    </div>`;
+  }
+
+  function openTaskForm(){
+    const rooms = Store.all('rooms').slice().sort((a,b)=>(a.number||'').localeCompare(b.number||'', undefined, {numeric:true}));
+    if(!rooms.length){ toast('Add a room first.', 'err'); return; }
+    openModal({
+      title:'New housekeeping task',
+      bodyHtml: `
+        <div class="field"><label>Room</label><select id="hf-room">${rooms.map(r=>`<option value="${r.id}">${esc(r.number)}${r.name?' — '+esc(r.name):''}</option>`).join('')}</select></div>
+        <div class="field"><label>Type</label><select id="hf-type">
+          <option value="CLEAN">Cleaning</option><option value="INSPECT">Inspection</option><option value="MAINTENANCE">Maintenance</option>
+        </select></div>
+        <div class="field"><label>Notes</label><textarea id="hf-notes" placeholder="e.g. AC not cooling, guest requested extra towels"></textarea></div>
+      `,
+      footerHtml: `<button class="btn" data-close>Cancel</button><button class="btn btn-primary" id="hf-save">Create task</button>`,
+      onMount(){
+        qs('#hf-save').addEventListener('click', ()=>{
+          Store.insert('housekeepingTasks', { roomId: qs('#hf-room').value, type: qs('#hf-type').value, status:'PENDING', notes: qs('#hf-notes').value.trim(), consumedItems:[] });
+          closeModal(); toast('Task created', 'ok'); render();
+        });
+      }
+    });
+  }
+
+  function openCompleteForm(task){
+    if(!task) return;
+    const room = Store.find('rooms', task.roomId);
+    const items = Store.all('inventoryItems');
+    openModal({
+      title:`Complete task — Room ${room?room.number:'?'}`, size:'lg',
+      bodyHtml: `
+        <p class="hint mb-12">${task.type==='CLEAN' ? 'Marks the room vacant &amp; clean once finished.' : 'Marking this task done leaves the room’s status unchanged.'}</p>
+        ${items.length ? `
+          <div class="section-title">Supplies used (optional)</div>
+          <div id="hc-items"></div>
+          <button class="btn btn-sm" id="hc-add-item" type="button">+ Add supply used</button>
+        ` : ''}
+        <div class="field mt-12"><label>Completion notes</label><textarea id="hc-notes"></textarea></div>
+      `,
+      footerHtml: `<button class="btn" data-close>Cancel</button><button class="btn btn-primary" id="hc-save">Mark done</button>`,
+      onMount(modal){
+        const itemsWrap = qs('#hc-items', modal);
+        function addRow(){
+          if(!itemsWrap) return;
+          const row = document.createElement('div');
+          row.className = 'form-row hc-item-row';
+          row.innerHTML = `<div class="field"><label>Item</label><select class="hc-item-sel">${items.map(i=>`<option value="${i.id}">${esc(i.name)}</option>`).join('')}</select></div>
+            <div class="field"><label>Qty</label><input type="number" min="1" step="1" class="hc-item-qty" value="1"></div>
+            <button type="button" class="btn btn-sm btn-ghost hc-item-del" style="align-self:end">Remove</button>`;
+          itemsWrap.appendChild(row);
+          row.querySelector('.hc-item-del').addEventListener('click', ()=>row.remove());
+        }
+        if(qs('#hc-add-item', modal)) qs('#hc-add-item', modal).addEventListener('click', addRow);
+
+        qs('#hc-save', modal).addEventListener('click', ()=>{
+          const consumedItems = itemsWrap ? qsa('.hc-item-row', itemsWrap).map(row=>({
+            itemId: row.querySelector('.hc-item-sel').value,
+            qty: parseInt(row.querySelector('.hc-item-qty').value,10)||0
+          })).filter(c=>c.qty>0) : [];
+          consumedItems.forEach(c=>{
+            const item = Store.find('inventoryItems', c.itemId);
+            InventoryModule.consume(c.itemId, c.qty, `Housekeeping — Room ${room?room.number:'?'}`);
+          });
+          Store.update('housekeepingTasks', task.id, { status:'DONE', completedAt: nowISO(), notes: qs('#hc-notes', modal).value.trim()||task.notes, consumedItems });
+          if(task.type==='CLEAN') Store.update('rooms', task.roomId, { status:'VACANT_CLEAN' });
+          closeModal(); toast('Task completed', 'ok'); render();
+        });
+      }
+    });
+  }
+
+  Router.on('/housekeeping', render);
+  window.HousekeepingModule = { ensureCleaningTask };
+})();
+
+
+/* ---- modules/dynamicpricing.js ---- */
+/* ---------------------------------------------------------------------
+   dynamicpricing.js — Guesthouse rate rules: occupancy-based, lead-time
+   and day-of-week adjustments layered on top of a room type's base
+   nightly rate. Rules stack in the order they're listed. reservations.js
+   calls DynamicPricingModule.quote() when a reservation's dates/room
+   type change, to suggest a rate — the staff member can still type over
+   it, same as the base rate today.
+--------------------------------------------------------------------- */
+
+(function(){
+
+  const DOW_NAMES = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
+
+  function typeLabel(t){ return t==='OCCUPANCY' ? 'Occupancy' : t==='LEAD_TIME' ? 'Lead time' : 'Day of week'; }
+
+  function ruleSummary(r){
+    const sym = (Store.settings && Store.settings.currencySymbol) || '$';
+    const adj = `${r.adjustValue>=0?'+':''}${r.adjustValue}${r.adjustType==='PERCENT'?'%':' '+sym}`;
+    if(r.type==='OCCUPANCY') return `When occupancy is ${r.operator==='GTE'?'at least':'at most'} ${r.threshold}%, adjust rate by ${adj}`;
+    if(r.type==='LEAD_TIME') return `When booked ${r.operator==='LTE'?'within':'at least'} ${r.threshold} day(s) of check-in, adjust rate by ${adj}`;
+    return `On ${(r.days||[]).map(d=>DOW_NAMES[d]).join('/')||'—'}, adjust rate by ${adj}`;
+  }
+
+  // Occupancy % for a room type on a given date, based on existing
+  // (non-cancelled) reservations whose stay covers that date.
+  function occupancyOnDate(roomTypeId, dateISO){
+    const rooms = Store.where('rooms', r=>r.roomTypeId===roomTypeId && r.status!=='OUT_OF_SERVICE');
+    if(!rooms.length) return 0;
+    const occupied = Store.where('reservations', r=>r.roomTypeId===roomTypeId && !['CANCELLED','NO_SHOW'].includes(r.status) && r.checkIn<=dateISO && dateISO<r.checkOut).length;
+    return Ledger.round2(100*Math.min(occupied, rooms.length)/rooms.length);
+  }
+
+  function ruleApplies(r, roomTypeId, dateISO){
+    if(r.active===false) return false;
+    if(r.roomTypeId && r.roomTypeId!==roomTypeId) return false;
+    if(r.type==='OCCUPANCY'){
+      const occ = occupancyOnDate(roomTypeId, dateISO);
+      return r.operator==='GTE' ? occ>=r.threshold : occ<=r.threshold;
+    }
+    if(r.type==='LEAD_TIME'){
+      const lead = Math.round((new Date(dateISO+'T00:00:00') - new Date(todayISO()+'T00:00:00'))/86400000);
+      return r.operator==='LTE' ? lead<=r.threshold : lead>=r.threshold;
+    }
+    if(r.type==='DOW'){
+      const dow = new Date(dateISO+'T00:00:00').getDay();
+      return (r.days||[]).includes(dow);
+    }
+    return false;
+  }
+
+  // Returns { rate, baseRate, appliedRules:[{id,summary}] } — never throws;
+  // falls back to the room type's own nightlyRate if anything's missing.
+  function quote(roomTypeId, dateISO, baseRateOverride){
+    const roomType = Store.find('roomTypes', roomTypeId);
+    const baseRate = baseRateOverride!=null ? baseRateOverride : (roomType ? roomType.nightlyRate : 0);
+    if(!roomType || !dateISO) return { rate: baseRate, baseRate, appliedRules: [] };
+    const rules = Store.all('pricingRules');
+    let rate = baseRate;
+    const appliedRules = [];
+    rules.forEach(r=>{
+      if(!ruleApplies(r, roomTypeId, dateISO)) return;
+      rate = r.adjustType==='PERCENT' ? Ledger.round2(rate*(1+r.adjustValue/100)) : Ledger.round2(rate+r.adjustValue);
+      appliedRules.push({ id:r.id, summary: ruleSummary(r) });
+    });
+    rate = Math.max(0, rate);
+    return { rate, baseRate, appliedRules };
+  }
+
+  function render(){
+    setPageTitle('Dynamic pricing', 'Operations');
+    renderNav();
+    const vo = Auth.isViewOnly();
+    const rules = Store.all('pricingRules').slice().sort((a,b)=>(a.createdAt||'').localeCompare(b.createdAt||''));
+    const roomTypes = Store.all('roomTypes');
+    qs('#content').innerHTML = `
+      <div class="help-box mb-16">Rules apply on top of a room type's base nightly rate when quoting a reservation, in the order listed below. Multiple matching rules stack.</div>
+      <div class="toolbar"><div class="spacer"></div>${vo?'':`<button class="btn btn-primary" id="dp-add">+ Add rule</button>`}</div>
+      <div class="table-wrap"><table class="t">
+        <thead><tr><th>Room type</th><th>Rule</th><th>Adjustment</th><th>Status</th><th></th></tr></thead>
+        <tbody>
+        ${rules.length ? rules.map(r=>{
+          const rt = r.roomTypeId ? Store.find('roomTypes', r.roomTypeId) : null;
+          return `<tr><td>${esc(rt?rt.name:'All room types')}</td><td>${esc(typeLabel(r.type))} — ${esc(ruleSummary(r))}</td>
+            <td class="mono">${r.adjustValue>=0?'+':''}${r.adjustValue}${r.adjustType==='PERCENT'?'%':' '+((Store.settings&&Store.settings.currencySymbol)||'$')}</td>
+            <td>${r.active===false?'<span class="badge badge-gray">Inactive</span>':'<span class="badge badge-green">Active</span>'}</td>
+            <td class="row-actions">${vo?'':`<button class="btn btn-sm" data-edit="${r.id}">Edit</button><button class="btn btn-sm btn-ghost" data-toggle="${r.id}">${r.active===false?'Activate':'Deactivate'}</button><button class="btn btn-sm btn-ghost" data-del="${r.id}">Delete</button>`}</td></tr>`;
+        }).join('') : `<tr><td colspan="5" class="table-empty">No pricing rules yet — room types just use their flat base rate.</td></tr>`}
+        </tbody>
+      </table></div>
+    `;
+    if(qs('#dp-add')) qs('#dp-add').addEventListener('click', ()=>openRuleForm());
+    qsa('[data-edit]').forEach(b=>b.addEventListener('click', ()=>openRuleForm(Store.find('pricingRules', b.dataset.edit))));
+    qsa('[data-toggle]').forEach(b=>b.addEventListener('click', ()=>{ const r = Store.find('pricingRules', b.dataset.toggle); Store.update('pricingRules', r.id, { active: r.active===false }); render(); }));
+    qsa('[data-del]').forEach(b=>b.addEventListener('click', ()=>{ Store.remove('pricingRules', b.dataset.del); toast('Rule deleted'); render(); }));
+  }
+
+  function openRuleForm(existing){
+    const roomTypes = Store.all('roomTypes');
+    openModal({
+      title: existing ? 'Edit pricing rule' : 'Add pricing rule', size:'lg',
+      bodyHtml: `
+        <div class="field"><label>Room type</label><select id="pf-rt"><option value="">All room types</option>${roomTypes.map(t=>`<option value="${t.id}" ${existing&&existing.roomTypeId===t.id?'selected':''}>${esc(t.name)}</option>`).join('')}</select></div>
+        <div class="field"><label>Rule type</label><select id="pf-type">
+          <option value="OCCUPANCY" ${existing&&existing.type==='OCCUPANCY'?'selected':''}>Occupancy</option>
+          <option value="LEAD_TIME" ${existing&&existing.type==='LEAD_TIME'?'selected':''}>Lead time</option>
+          <option value="DOW" ${existing&&existing.type==='DOW'?'selected':''}>Day of week</option>
+        </select></div>
+        <div id="pf-cond"></div>
+        <div class="form-row">
+          <div class="field"><label>Adjustment type</label><select id="pf-adjtype">
+            <option value="PERCENT" ${!existing||existing.adjustType==='PERCENT'?'selected':''}>Percent</option>
+            <option value="AMOUNT" ${existing&&existing.adjustType==='AMOUNT'?'selected':''}>Flat amount</option>
+          </select></div>
+          <div class="field"><label>Adjustment value <span class="hint">(negative lowers the rate)</span></label><input id="pf-adjval" type="number" step="0.01" value="${existing?existing.adjustValue:10}"></div>
+        </div>
+      `,
+      footerHtml: `<button class="btn" data-close>Cancel</button><button class="btn btn-primary" id="pf-save">Save</button>`,
+      onMount(modal){
+        const typeSel = qs('#pf-type', modal), condWrap = qs('#pf-cond', modal);
+        function paintCond(){
+          const t = typeSel.value;
+          if(t==='OCCUPANCY'){
+            condWrap.innerHTML = `<div class="form-row">
+              <div class="field"><label>When occupancy is</label><select id="pf-op"><option value="GTE" ${existing&&existing.operator==='GTE'?'selected':''}>At least (%)</option><option value="LTE" ${existing&&existing.operator==='LTE'?'selected':''}>At most (%)</option></select></div>
+              <div class="field"><label>Threshold %</label><input id="pf-threshold" type="number" min="0" max="100" value="${existing&&existing.type==='OCCUPANCY'?existing.threshold:80}"></div>
+            </div>`;
+          } else if(t==='LEAD_TIME'){
+            condWrap.innerHTML = `<div class="form-row">
+              <div class="field"><label>When booked</label><select id="pf-op"><option value="LTE" ${existing&&existing.operator==='LTE'?'selected':''}>Within (days)</option><option value="GTE" ${existing&&existing.operator==='GTE'?'selected':''}>At least (days ahead)</option></select></div>
+              <div class="field"><label>Threshold (days)</label><input id="pf-threshold" type="number" min="0" value="${existing&&existing.type==='LEAD_TIME'?existing.threshold:3}"></div>
+            </div>`;
+          } else {
+            const sel = (existing&&existing.days)||[];
+            condWrap.innerHTML = `<div class="field"><label>Days</label><div class="flex-gap">${DOW_NAMES.map((n,i)=>`<label class="checkline"><input type="checkbox" class="pf-dow" value="${i}" ${sel.includes(i)?'checked':''}> ${n}</label>`).join('')}</div></div>`;
+          }
+        }
+        typeSel.addEventListener('change', paintCond);
+        paintCond();
+
+        qs('#pf-save', modal).addEventListener('click', ()=>{
+          const type = typeSel.value;
+          const data = {
+            roomTypeId: qs('#pf-rt', modal).value||null, type,
+            adjustType: qs('#pf-adjtype', modal).value,
+            adjustValue: parseFloat(qs('#pf-adjval', modal).value)||0,
+            active: true,
+          };
+          if(type==='DOW'){
+            data.days = qsa('.pf-dow', modal).filter(c=>c.checked).map(c=>parseInt(c.value,10));
+            if(!data.days.length){ toast('Pick at least one day.', 'err'); return; }
+          } else {
+            data.operator = qs('#pf-op', modal).value;
+            data.threshold = parseFloat(qs('#pf-threshold', modal).value)||0;
+          }
+          if(existing) Store.update('pricingRules', existing.id, data);
+          else Store.insert('pricingRules', data);
+          closeModal(); toast('Pricing rule saved', 'ok'); render();
+        });
+      }
+    });
+  }
+
+  Router.on('/pricing', render);
+  window.DynamicPricingModule = { quote };
+})();
+
+
+/* ---- modules/channels.js ---- */
+/* ---------------------------------------------------------------------
+   channels.js — Guesthouse channel manager mock: a simulated view of
+   OTA rate/availability sync (Booking.com, Airbnb, Agoda, Expedia),
+   mirroring the reference app's /channels. There's no real OTA
+   connection here — "Sync now" just re-checks each channel's mock rate
+   against this room type's real current rate and flags a mismatch, the
+   same rate-parity idea a real channel manager would surface.
+--------------------------------------------------------------------- */
+
+(function(){
+
+  const CHANNEL_DEFS = [
+    { key:'booking', name:'Booking.com', commission:15 },
+    { key:'airbnb', name:'Airbnb', commission:3 },
+    { key:'agoda', name:'Agoda', commission:16 },
+    { key:'expedia', name:'Expedia', commission:18 },
+  ];
+
+  function ensureSeeded(){
+    if(Store.all('channels').length) return;
+    CHANNEL_DEFS.forEach(c=>Store.insert('channels', { key:c.key, name:c.name, commission:c.commission, connected:true, lastSyncedAt:null, rateOffsets:{} }));
+  }
+
+  // Deterministic-ish mock offset per channel+roomType so re-renders don't
+  // jitter the numbers between paints — only "Sync now" changes them.
+  function mockOffsetFor(channel, roomTypeId){
+    if(channel.rateOffsets && channel.rateOffsets[roomTypeId]!=null) return channel.rateOffsets[roomTypeId];
+    return 0;
+  }
+
+  function render(){
+    ensureSeeded();
+    setPageTitle('Channel manager', 'Operations');
+    renderNav();
+    const vo = Auth.isViewOnly();
+    const channels = Store.all('channels');
+    const roomTypes = Store.all('roomTypes').filter(t=>t.active!==false);
+    qs('#content').innerHTML = `
+      <div class="help-box mb-16">Simulated OTA sync — there's no live connection to any channel. "Sync now" mimics pulling each channel's current listed rate and checking it against this room type's real rate, the way a real channel manager/rate-parity check would.</div>
+      ${roomTypes.length ? roomTypes.map(rt=>channelCard(rt, channels, vo)).join('') : `<div class="card"><p class="muted small">Add a room type first.</p></div>`}
+    `;
+    qsa('[data-sync]').forEach(b=>b.addEventListener('click', ()=>{ syncChannel(b.dataset.sync, b.dataset.rt); render(); }));
+    qsa('[data-sync-all]').forEach(b=>b.addEventListener('click', ()=>{ channels.forEach(c=>syncChannel(c.id, b.dataset.syncAll)); render(); }));
+  }
+
+  function channelCard(rt, channels, vo){
+    return `<div class="card">
+      <div class="card-head"><h2>${esc(rt.name)}</h2><span class="sub">Base rate ${fmtMoney(rt.nightlyRate)}</span>${vo?'':`<button class="btn btn-sm" data-sync-all="${rt.id}">Sync all channels</button>`}</div>
+      <div class="table-wrap"><table class="t">
+        <thead><tr><th>Channel</th><th>Commission</th><th class="num">Listed rate</th><th>Rate parity</th><th>Last synced</th><th></th></tr></thead>
+        <tbody>${channels.map(c=>{
+          const offset = mockOffsetFor(c, rt.id);
+          const listed = Ledger.round2(rt.nightlyRate + offset);
+          const parity = Math.abs(offset)<0.005;
+          return `<tr><td>${esc(c.name)}</td><td>${c.commission}%</td><td class="num">${fmtMoney(listed)}</td>
+            <td>${parity?'<span class="badge badge-green">In parity</span>':`<span class="badge badge-amber">Mismatch (${offset>0?'+':''}${fmtMoney(offset)})</span>`}</td>
+            <td class="small muted">${c.lastSyncedAt?fmtDateTime(c.lastSyncedAt):'Never'}</td>
+            <td class="row-actions">${vo?'':`<button class="btn btn-sm" data-sync="${c.id}" data-rt="${rt.id}">Sync now</button>`}</td></tr>`;
+        }).join('')}</tbody>
+      </table></div>
+    </div>`;
+  }
+
+  // Mock sync: 70% chance the channel is in parity, otherwise a small
+  // random variance appears — just enough to make "Sync now" do something
+  // visible without pretending to talk to a real OTA.
+  function syncChannel(channelId, roomTypeId){
+    const c = Store.find('channels', channelId);
+    if(!c) return;
+    const inParity = Math.random() < 0.7;
+    const offset = inParity ? 0 : Ledger.round2((Math.random()*10-5));
+    const rateOffsets = Object.assign({}, c.rateOffsets||{}, { [roomTypeId]: offset });
+    Store.update('channels', c.id, { rateOffsets, lastSyncedAt: nowISO() });
+    toast(inParity ? `${c.name} is in rate parity` : `${c.name} rate mismatch detected`, inParity?'ok':'err');
+  }
+
+  Router.on('/channels', render);
+})();
+
+
+/* ---- modules/public.js ---- */
+/* ---------------------------------------------------------------------
+   public.js — Guesthouse guest-facing booking site (/book) and a compact
+   embeddable widget (/widget), reached with no staff login and no setup
+   wizard (see app.js's isPublicRoute()/continueBoot()). Like the waiver
+   kiosk, these replace the whole document rather than living inside the
+   normal shell.
+
+   Architecture note: this single-file app's data lives in this one
+   browser's localStorage, so today these routes only show real
+   availability on the same device the business set up on (handy for a
+   front-desk kiosk, or testing) — a guest on their own phone needs the
+   cloud-hosted edition (server/) for this to see real shared data, which
+   isn't wired up yet (see app.js's boot()). The booking flow itself
+   (search → pick a room type → guest details → confirm) is complete and
+   writes a real reservation either way.
+--------------------------------------------------------------------- */
+
+(function(){
+
+  function nights(ci, co){
+    if(!ci || !co) return 0;
+    return Math.max(0, Math.round((new Date(co+'T00:00:00') - new Date(ci+'T00:00:00'))/86400000));
+  }
+
+  // How many rooms of this type have zero reservations overlapping
+  // [checkIn, checkOut) — mirrors reservations.js's own availability
+  // check, kept standalone here so this file has no load-order dependency
+  // on the staff-side module.
+  function roomsAvailable(roomTypeId, checkIn, checkOut){
+    const rooms = Store.where('rooms', r=>r.roomTypeId===roomTypeId && r.status!=='OUT_OF_SERVICE');
+    const busy = Store.where('reservations', r=>!['CANCELLED','NO_SHOW'].includes(r.status) && r.checkIn<checkOut && checkIn<r.checkOut);
+    const busyRoomIds = new Set(busy.map(r=>r.roomId));
+    return rooms.filter(r=>!busyRoomIds.has(r.id));
+  }
+
+  function shell(bodyHtml, opts){
+    opts = opts||{};
+    document.body.innerHTML = `
+      <div style="min-height:100vh;background:var(--paper);display:flex;flex-direction:column;font-family:inherit">
+        <div style="padding:16px 24px;background:var(--teal-dark);color:#fff;display:flex;align-items:center;justify-content:space-between">
+          <div><strong>${esc(Store.settings.companyName||'Guesthouse')}</strong>${opts.subtitle?' — '+esc(opts.subtitle):''}</div>
+          <a style="color:#fff;font-size:12.5px;cursor:pointer;text-decoration:underline" id="pub-staff">Staff sign-in</a>
+        </div>
+        <div style="flex:1;padding:${opts.pad||'32px 24px'};max-width:${opts.maxWidth||'760px'};margin:0 auto;width:100%">${bodyHtml}</div>
+      </div>
+    `;
+    if(qs('#pub-staff')) qs('#pub-staff').addEventListener('click', ()=>{ renderShell(); Router.navigate('dashboard'); });
+  }
+
+  function notSetUp(){
+    document.body.innerHTML = `<div style="min-height:100vh;display:flex;align-items:center;justify-content:center;font-family:inherit;background:var(--paper)">
+      <div class="card" style="max-width:420px"><h2>Online booking isn't open yet</h2><p class="muted">This property hasn't finished setting up in Ant App yet. Check back soon.</p></div>
+    </div>`;
+  }
+  function publicSiteReady(){ return !needsSetup() && BusinessTypes.navKey()==='ROOM_BASED'; }
+
+  /* ---------------- /book — full booking site ---------------- */
+  const bookState = { step:'search', checkIn:'', checkOut:'', roomTypeId:null, guests:1 };
+
+  function renderBook(params){
+    if(!publicSiteReady()){ notSetUp(); return; }
+    // renderBook is only invoked by an actual hash navigation to /book (step
+    // transitions within the flow call paintBook() directly, not via the
+    // router) — so every call here is a fresh arrival and should start over,
+    // not resume whatever step a previous visit left bookState on.
+    bookState.step = 'search';
+    bookState.roomTypeId = null;
+    if(params.ci) bookState.checkIn = params.ci;
+    if(params.co) bookState.checkOut = params.co;
+    paintBook();
+  }
+
+  function paintBook(){
+    if(bookState.step==='confirm') return paintConfirm();
+    if(bookState.step==='details') return paintDetails();
+    paintSearch();
+  }
+
+  function paintSearch(){
+    const { checkIn, checkOut, guests } = bookState;
+    const roomTypes = Store.all('roomTypes').filter(t=>t.active!==false);
+    let results = '';
+    if(checkIn && checkOut && checkOut>checkIn){
+      const n = nights(checkIn, checkOut);
+      results = roomTypes.map(rt=>{
+        const free = roomsAvailable(rt.id, checkIn, checkOut).filter(()=>true);
+        const freeForGuests = rt.maxOccupancy>=guests ? free : [];
+        const available = freeForGuests.length;
+        const quote = window.DynamicPricingModule ? DynamicPricingModule.quote(rt.id, checkIn, rt.nightlyRate) : { rate: rt.nightlyRate };
+        const total = Ledger.round2(quote.rate*n);
+        return `<div class="card mb-16">
+          <div class="card-head"><h2>${esc(rt.name)}</h2><span class="sub">Sleeps up to ${rt.maxOccupancy||1}</span></div>
+          <div class="flex-between">
+            <div>
+              <div class="mono" style="font-size:20px">${fmtMoney(quote.rate)} <span class="small muted">/ night</span></div>
+              <div class="small muted">${n} night(s) · ${fmtMoney(total)} total</div>
+              ${available ? `<div class="small" style="color:var(--success)">${available} room(s) available</div>` : `<div class="small" style="color:var(--danger)">Not available for these dates${rt.maxOccupancy<guests?' / party size':''}</div>`}
+            </div>
+            ${available ? `<button class="btn btn-primary" data-pick="${rt.id}">Select</button>` : ''}
+          </div>
+        </div>`;
+      }).join('') || `<p class="muted">No room types set up yet.</p>`;
+    } else if(checkIn || checkOut){
+      results = `<p class="hint">Pick both a check-in and a check-out date.</p>`;
+    }
+
+    const widgetUrl = location.origin + location.pathname + '#/widget';
+    shell(`
+      <h1 style="margin-top:0">Book your stay</h1>
+      <div class="card mb-16">
+        <div class="form-row">
+          <div class="field"><label>Check-in</label><input type="date" id="pb-ci" value="${esc(checkIn)}"></div>
+          <div class="field"><label>Check-out</label><input type="date" id="pb-co" value="${esc(checkOut)}"></div>
+          <div class="field"><label>Guests</label><input type="number" id="pb-guests" min="1" value="${guests}"></div>
+        </div>
+        <button class="btn btn-primary" id="pb-search">Check availability</button>
+      </div>
+      ${results}
+      <details class="mt-16"><summary class="small muted" style="cursor:pointer">Embed this search on your website</summary>
+        <p class="small muted mt-8">Drop this snippet into your site's HTML:</p>
+        <textarea readonly rows="2" style="width:100%;font-family:monospace;font-size:12px" onclick="this.select()">&lt;iframe src="${esc(widgetUrl)}" style="width:100%;max-width:420px;height:360px;border:1px solid #ddd;border-radius:8px"&gt;&lt;/iframe&gt;</textarea>
+      </details>
+    `, { subtitle:'Book direct' });
+
+    qs('#pb-search').addEventListener('click', ()=>{
+      bookState.checkIn = qs('#pb-ci').value;
+      bookState.checkOut = qs('#pb-co').value;
+      bookState.guests = parseInt(qs('#pb-guests').value,10)||1;
+      paintSearch();
+    });
+    qsa('[data-pick]').forEach(b=>b.addEventListener('click', ()=>{ bookState.roomTypeId = b.dataset.pick; bookState.step='details'; paintBook(); }));
+  }
+
+  function paintDetails(){
+    const rt = Store.find('roomTypes', bookState.roomTypeId);
+    if(!rt){ bookState.step='search'; return paintBook(); }
+    const n = nights(bookState.checkIn, bookState.checkOut);
+    const quote = window.DynamicPricingModule ? DynamicPricingModule.quote(rt.id, bookState.checkIn, rt.nightlyRate) : { rate: rt.nightlyRate };
+    shell(`
+      <button class="btn btn-sm mb-16" id="pb-back">&larr; Back to search</button>
+      <div class="card">
+        <div class="card-head"><h2>${esc(rt.name)}</h2><span class="sub">${fmtDate(bookState.checkIn)} – ${fmtDate(bookState.checkOut)} · ${n} night(s)</span></div>
+        <div class="mono mb-16" style="font-size:18px">${fmtMoney(Ledger.round2(quote.rate*n))} total</div>
+        <div class="field"><label>Full name</label><input id="pd-name" type="text"></div>
+        <div class="form-row">
+          <div class="field"><label>Email</label><input id="pd-email" type="email"></div>
+          <div class="field"><label>Phone</label><input id="pd-phone" type="text"></div>
+        </div>
+        <button class="btn btn-primary" id="pd-confirm">Request this reservation</button>
+        <p class="hint mt-12">This sends your request straight to the guesthouse — no payment is taken online.</p>
+      </div>
+    `, { subtitle:'Your details' });
+    qs('#pb-back').addEventListener('click', ()=>{ bookState.step='search'; paintBook(); });
+    qs('#pd-confirm').addEventListener('click', ()=>{
+      const name = qs('#pd-name').value.trim();
+      if(!name){ toast('Enter your name.', 'err'); return; }
+      const guest = Store.insert('guests', { name, email: qs('#pd-email').value.trim(), phone: qs('#pd-phone').value.trim() });
+      const rooms = roomsAvailable(rt.id, bookState.checkIn, bookState.checkOut);
+      if(!rooms.length){ toast('Sorry, this room type was just booked out for these dates.', 'err'); bookState.step='search'; paintBook(); return; }
+      const res = Store.insert('reservations', {
+        reservationNo: Store.docNo('RES','reservation'),
+        customerId: 'CUST_DIRECT', roomTypeId: rt.id, roomId: rooms[0].id,
+        checkIn: bookState.checkIn, checkOut: bookState.checkOut, nights: n,
+        rate: quote.rate, extras: [], source:'ONLINE',
+        guests: [{ id: Store.uid('rg'), guestId: guest.id, isPrimary:true }],
+        status:'CONFIRMED'
+      });
+      bookState.step='confirm'; bookState.lastReservationNo = res.reservationNo;
+      paintBook();
+    });
+  }
+
+  function paintConfirm(){
+    shell(`
+      <div class="card">
+        <h2>You're booked!</h2>
+        <p>Confirmation <strong class="mono">${esc(bookState.lastReservationNo||'')}</strong> — we look forward to having you.</p>
+        <p class="muted small">The guesthouse will be in touch if anything needs confirming. Save your confirmation number for reference.</p>
+        <button class="btn mt-12" id="pb-again">Book another stay</button>
+      </div>
+    `, { subtitle:'Confirmed' });
+    qs('#pb-again').addEventListener('click', ()=>{ bookState.step='search'; bookState.roomTypeId=null; paintBook(); });
+  }
+
+  /* ---------------- /widget — compact embeddable search ---------------- */
+  function renderWidget(){
+    if(!publicSiteReady()){ notSetUp(); return; }
+    const bookUrl = location.pathname + '#/book';
+    document.body.innerHTML = `
+      <div style="padding:16px;font-family:inherit;background:var(--paper)">
+        <strong style="display:block;margin-bottom:10px">${esc(Store.settings.companyName||'Guesthouse')}</strong>
+        <div class="field"><label>Check-in</label><input type="date" id="wg-ci"></div>
+        <div class="field"><label>Check-out</label><input type="date" id="wg-co"></div>
+        <button class="btn btn-primary" id="wg-go" style="width:100%;margin-top:6px">Check availability</button>
+      </div>
+    `;
+    qs('#wg-go').addEventListener('click', ()=>{
+      const ci = qs('#wg-ci').value, co = qs('#wg-co').value;
+      location.hash = `/book?ci=${encodeURIComponent(ci)}&co=${encodeURIComponent(co)}`;
+    });
+  }
+
+  Router.on('/book', renderBook);
+  Router.on('/widget', renderWidget);
 })();
 
 
@@ -8728,6 +9510,11 @@ window.Posting = Posting;
       {t:'tax', label:'Tax'},
       {t:'trips', label:'Trip P&amp;L'},
       {t:'equipment', label:'Equipment usage'},
+      {t:'occupancy', label:'Occupancy, ADR &amp; RevPAR'},
+      {t:'guestinfo', label:'Guest information'},
+      {t:'revsummary', label:'Revenue summary'},
+      {t:'agentperf', label:'Booking source &amp; agents'},
+      {t:'gstgh', label:'GST (TGST)'},
     ];
     qs('#content').innerHTML = `
       <div class="tabs">
@@ -8740,7 +9527,9 @@ window.Posting = Posting;
       menu: renderMenu, pnl: renderPnL, bs: renderBS, tb: renderTB, cashflow: renderCashFlow,
       gl: renderGL, araging: renderARAging, apaging: renderAPAging,
       customers: renderCustomers, vendors: renderVendors, tax: renderTax,
-      trips: renderTripPnL, equipment: renderEquipmentUsage
+      trips: renderTripPnL, equipment: renderEquipmentUsage,
+      occupancy: renderOccupancy, guestinfo: renderGuestInfo, revsummary: renderRevSummary,
+      agentperf: renderAgentPerf, gstgh: renderGstGh,
     };
     (map[tab]||renderMenu)();
   }
@@ -8778,6 +9567,15 @@ window.Posting = Posting;
         ['journal','Journal report','Chronological list of every posting (opens Journal entries)'],
       ]},
     ];
+    if(BusinessTypes.navKey()==='ROOM_BASED'){
+      cats.push({ title:'Guesthouse', items:[
+        ['occupancy','Occupancy, ADR & RevPAR','Nights sold, average daily rate, revenue per available room'],
+        ['guestinfo','Guest information','Guests who stayed, by nights and stays'],
+        ['revsummary','Revenue summary','Room/extras/tax revenue, direct vs. agent'],
+        ['agentperf','Booking source & agent performance','Bookings, nights and revenue by customer'],
+        ['gstgh','GST (TGST) worksheet','MIRA Form 206-aligned output tax worksheet'],
+      ]});
+    }
 
     qs('#rp-body').innerHTML = `
       <div class="grid grid-4 mb-16">
@@ -9342,6 +10140,222 @@ window.Posting = Posting;
   }
 
   /* ---------------- TAX ---------------- */
+  /* ---------------- GUESTHOUSE: occupancy / ADR / RevPAR ---------------- */
+  // Stay-based metrics (occupancy, room-nights) use reservation check-in/
+  // check-out dates clipped to the period; revenue (for ADR/RevPAR) uses
+  // folio invoices *posted* within the period — two different, honestly-
+  // simpler date bases, called out in the help text rather than hidden.
+  function diffDays(from, to){ return Math.round((new Date(to+'T00:00:00') - new Date(from+'T00:00:00'))/86400000); }
+  function nightsInRange(res, from, to){
+    const start = res.checkIn > from ? res.checkIn : from;
+    const end = res.checkOut < to ? res.checkOut : to;
+    return Math.max(0, diffDays(start, end));
+  }
+  const occState = { from:null, to:null };
+  function renderOccupancy(){
+    if(!occState.from){ const [f,t] = presetRange('THIS_MONTH'); occState.from=f; occState.to=t; }
+    paintOccupancy();
+  }
+  function paintOccupancy(){
+    const { from, to } = occState;
+    const periodDays = Math.max(1, diffDays(from, to)+1);
+    const rooms = Store.all('rooms').filter(r=>r.status!=='OUT_OF_SERVICE');
+    const reservations = Store.all('reservations').filter(r=>!['CANCELLED','NO_SHOW'].includes(r.status));
+    const availableRoomNights = rooms.length * periodDays;
+    const soldRoomNights = reservations.reduce((s,r)=>s+nightsInRange(r, from, to), 0);
+    const occPct = availableRoomNights ? Ledger.round2(100*soldRoomNights/availableRoomNights) : 0;
+    const invoices = Store.all('reservationInvoices').filter(i=>i.date>=from && i.date<=to);
+    const roomRevenue = Ledger.round2(invoices.reduce((s,i)=>s+i.lines.reduce((s2,l)=>s2+(l.roomAmount||0),0),0));
+    const adr = soldRoomNights ? Ledger.round2(roomRevenue/soldRoomNights) : 0;
+    const revpar = availableRoomNights ? Ledger.round2(roomRevenue/availableRoomNights) : 0;
+
+    const roomTypes = Store.all('roomTypes').filter(t=>t.active!==false);
+    const byType = roomTypes.map(rt=>{
+      const rtRooms = rooms.filter(r=>r.roomTypeId===rt.id);
+      const avail = rtRooms.length * periodDays;
+      const sold = reservations.filter(r=>r.roomTypeId===rt.id).reduce((s,r)=>s+nightsInRange(r, from, to), 0);
+      return { rt, avail, sold, pct: avail ? Ledger.round2(100*sold/avail) : 0 };
+    });
+
+    qs('#rp-body').innerHTML = `
+      <div class="card">
+        <div class="card-head"><h2>Occupancy, ADR &amp; RevPAR</h2><div class="sub">${fmtDate(from)} – ${fmtDate(to)}</div></div>
+        <div class="help-box mb-16">Occupancy/room-nights use reservation stay dates clipped to this period. Room revenue (for ADR/RevPAR) is folio invoices <em>posted</em> in this period — the two can diverge if a stay spans a period boundary or a folio is invoiced late.</div>
+        ${dateRangeBar('occ', from, to)}
+        <div class="grid grid-4 mb-16">
+          <div class="stat"><div class="label">Occupancy</div><div class="value">${occPct}%</div><div class="sub">${soldRoomNights} of ${availableRoomNights} room-nights</div></div>
+          <div class="stat"><div class="label">ADR</div><div class="value">${fmtMoney(adr)}</div><div class="sub">Average daily rate</div></div>
+          <div class="stat"><div class="label">RevPAR</div><div class="value">${fmtMoney(revpar)}</div><div class="sub">Revenue per available room</div></div>
+          <div class="stat"><div class="label">Room revenue</div><div class="value">${fmtMoney(roomRevenue)}</div><div class="sub">Folio invoices in period</div></div>
+        </div>
+      </div>
+      <div class="card">
+        <div class="card-head"><h2>Occupancy by room type</h2></div>
+        <div class="table-wrap"><table class="t">
+          <thead><tr><th>Room type</th><th class="num">Room-nights sold</th><th class="num">Room-nights available</th><th class="num">Occupancy</th></tr></thead>
+          <tbody>${byType.length ? byType.map(r=>`<tr><td>${esc(r.rt.name)}</td><td class="num">${r.sold}</td><td class="num">${r.avail}</td><td class="num">${r.pct}%</td></tr>`).join('')
+            : `<tr><td colspan="4" class="table-empty">No room types yet.</td></tr>`}</tbody>
+        </table></div>
+      </div>
+    `;
+    wireDateRangeBar('occ', (f,t)=>{ occState.from=f; occState.to=t; paintOccupancy(); });
+  }
+
+  /* ---------------- GUESTHOUSE: guest information ---------------- */
+  const guestInfoState = { from:null, to:null };
+  function renderGuestInfo(){
+    if(!guestInfoState.from){ const [f,t] = presetRange('THIS_MONTH'); guestInfoState.from=f; guestInfoState.to=t; }
+    paintGuestInfo();
+  }
+  function paintGuestInfo(){
+    const { from, to } = guestInfoState;
+    const reservations = Store.all('reservations').filter(r=>!['CANCELLED','NO_SHOW'].includes(r.status) && nightsInRange(r, from, to)>0);
+    const byGuest = {};
+    reservations.forEach(r=>{
+      const nights = nightsInRange(r, from, to);
+      (r.guests||[]).forEach(gl=>{
+        const g = Store.find('guests', gl.guestId);
+        if(!g) return;
+        if(!byGuest[g.id]) byGuest[g.id] = { guest:g, nights:0, stays:0 };
+        byGuest[g.id].nights += nights;
+        byGuest[g.id].stays += 1;
+      });
+    });
+    const rows = Object.values(byGuest).sort((a,b)=>b.nights-a.nights);
+    qs('#rp-body').innerHTML = `
+      <div class="card">
+        <div class="card-head"><h2>Guest information</h2><div class="sub">${fmtDate(from)} – ${fmtDate(to)}</div></div>
+        ${dateRangeBar('gi', from, to, `<button class="btn btn-sm" id="gi-csv">Export CSV</button>`)}
+        <div class="table-wrap"><table class="t">
+          <thead><tr><th>Guest</th><th>Nationality</th><th>Passport/ID</th><th class="num">Stays</th><th class="num">Nights</th></tr></thead>
+          <tbody>${rows.length ? rows.map(r=>`<tr style="cursor:pointer" onclick="Router.navigate('guests/${r.guest.id}')">
+            <td>${esc(r.guest.name)}</td><td>${esc(r.guest.nationality||'—')}</td><td class="mono">${esc(r.guest.passportNo||'—')}</td>
+            <td class="num">${r.stays}</td><td class="num">${r.nights}</td></tr>`).join('')
+            : `<tr><td colspan="5" class="table-empty">No stays in this period.</td></tr>`}</tbody>
+        </table></div>
+      </div>
+    `;
+    wireDateRangeBar('gi', (f,t)=>{ guestInfoState.from=f; guestInfoState.to=t; paintGuestInfo(); });
+    qs('#gi-csv').addEventListener('click', ()=>{
+      downloadFile('guest-information.csv', toCsv(['Guest','Nationality','Passport/ID','Stays','Nights'],
+        rows.map(r=>[r.guest.name, r.guest.nationality||'', r.guest.passportNo||'', r.stays, r.nights])), 'text/csv');
+    });
+  }
+
+  /* ---------------- GUESTHOUSE: revenue summary ---------------- */
+  const revSummaryState = { from:null, to:null };
+  function renderRevSummary(){
+    if(!revSummaryState.from){ const [f,t] = presetRange('THIS_MONTH'); revSummaryState.from=f; revSummaryState.to=t; }
+    paintRevSummary();
+  }
+  function paintRevSummary(){
+    const { from, to } = revSummaryState;
+    const invoices = Store.all('reservationInvoices').filter(i=>i.date>=from && i.date<=to);
+    function splitBy(pred){
+      const set = invoices.filter(pred);
+      return {
+        room: Ledger.round2(set.reduce((s,i)=>s+i.lines.reduce((s2,l)=>s2+(l.roomAmount||0),0),0)),
+        extras: Ledger.round2(set.reduce((s,i)=>s+i.lines.reduce((s2,l)=>s2+(l.extrasAmount||0),0),0)),
+        tax: Ledger.round2(set.reduce((s,i)=>s+(i.tax||0),0)),
+        total: Ledger.round2(set.reduce((s,i)=>s+(i.total||0),0)),
+      };
+    }
+    const isAgent = (i)=>{ const c = Store.find('customers', i.customerId); return c && c.type==='AGENT'; };
+    const all = splitBy(()=>true), direct = splitBy(i=>!isAgent(i)), agent = splitBy(isAgent);
+    const row = (label, d, cls)=> `<tr class="${cls||''}"><td>${esc(label)}</td><td class="num">${fmtMoney(d.room)}</td><td class="num">${fmtMoney(d.extras)}</td><td class="num">${fmtMoney(d.tax)}</td><td class="num">${fmtMoney(d.total)}</td></tr>`;
+    qs('#rp-body').innerHTML = `
+      <div class="card">
+        <div class="card-head"><h2>Revenue summary</h2><div class="sub">${fmtDate(from)} – ${fmtDate(to)} · folio invoices posted in period</div></div>
+        ${dateRangeBar('rs', from, to)}
+        <div class="table-wrap"><table class="t">
+          <thead><tr><th></th><th class="num">Room</th><th class="num">Extras</th><th class="num">Tax</th><th class="num">Total</th></tr></thead>
+          <tbody>
+            ${row('Direct guests', direct)}
+            ${row('Via agents', agent)}
+            ${row('All invoices', all, 'report-total')}
+          </tbody>
+        </table></div>
+      </div>
+    `;
+    wireDateRangeBar('rs', (f,t)=>{ revSummaryState.from=f; revSummaryState.to=t; paintRevSummary(); });
+  }
+
+  /* ---------------- GUESTHOUSE: booking source & agent performance ---------------- */
+  const agentPerfState = { from:null, to:null };
+  function renderAgentPerf(){
+    if(!agentPerfState.from){ const [f,t] = presetRange('THIS_MONTH'); agentPerfState.from=f; agentPerfState.to=t; }
+    paintAgentPerf();
+  }
+  function paintAgentPerf(){
+    const { from, to } = agentPerfState;
+    const reservations = Store.all('reservations').filter(r=>!['CANCELLED','NO_SHOW'].includes(r.status) && r.checkIn>=from && r.checkIn<=to);
+    const invoices = Store.all('reservationInvoices').filter(i=>i.date>=from && i.date<=to);
+    const byCustomer = {};
+    reservations.forEach(r=>{
+      const c = Store.find('customers', r.customerId);
+      const key = c ? c.id : 'unknown';
+      if(!byCustomer[key]) byCustomer[key] = { customer:c, bookings:0, nights:0, revenue:0 };
+      byCustomer[key].bookings += 1;
+      byCustomer[key].nights += (r.nights||0);
+    });
+    invoices.forEach(i=>{
+      if(byCustomer[i.customerId]) byCustomer[i.customerId].revenue = Ledger.round2(byCustomer[i.customerId].revenue + (i.total||0));
+    });
+    const rows = Object.values(byCustomer).filter(r=>r.customer).sort((a,b)=>b.revenue-a.revenue);
+    const directRows = rows.filter(r=>r.customer.type!=='AGENT');
+    const agentRows = rows.filter(r=>r.customer.type==='AGENT');
+    const tbl = (list)=> `<div class="table-wrap"><table class="t">
+      <thead><tr><th>Customer</th><th class="num">Bookings</th><th class="num">Nights</th><th class="num">Revenue invoiced</th></tr></thead>
+      <tbody>${list.length ? list.map(r=>`<tr><td>${esc(r.customer.name)}</td><td class="num">${r.bookings}</td><td class="num">${r.nights}</td><td class="num">${fmtMoney(r.revenue)}</td></tr>`).join('')
+        : `<tr><td colspan="4" class="table-empty">None in this period.</td></tr>`}</tbody>
+    </table></div>`;
+    qs('#rp-body').innerHTML = `
+      <div class="card">
+        <div class="card-head"><h2>Booking source &amp; agent performance</h2><div class="sub">${fmtDate(from)} – ${fmtDate(to)} · by arrival date</div></div>
+        ${dateRangeBar('ap', from, to)}
+      </div>
+      <div class="card"><div class="card-head"><h2>Direct bookings</h2></div>${tbl(directRows)}</div>
+      <div class="card"><div class="card-head"><h2>Agents</h2></div>${tbl(agentRows)}</div>
+    `;
+    wireDateRangeBar('ap', (f,t)=>{ agentPerfState.from=f; agentPerfState.to=t; paintAgentPerf(); });
+  }
+
+  /* ---------------- GUESTHOUSE: GST (TGST) worksheet, MIRA Form 206-style ---------------- */
+  const gstGhState = { from:null, to:null };
+  function renderGstGh(){
+    if(!gstGhState.from){ const [f,t] = presetRange('THIS_MONTH'); gstGhState.from=f; gstGhState.to=t; }
+    paintGstGh();
+  }
+  function paintGstGh(){
+    const { from, to } = gstGhState;
+    const invoices = Store.all('reservationInvoices').filter(i=>i.date>=from && i.date<=to);
+    const gross = Ledger.round2(invoices.reduce((s,i)=>s+(i.subTotal||0),0));
+    const outputTax = Ledger.round2(invoices.reduce((s,i)=>s+(i.tax||0),0));
+    qs('#rp-body').innerHTML = `
+      <div class="card">
+        <div class="card-head"><h2>GST (TGST) worksheet</h2><div class="sub">${fmtDate(from)} – ${fmtDate(to)}</div></div>
+        <div class="help-box mb-16">Laid out to mirror MIRA's Tourism GST return (Form MIRA 206) field structure. It does <strong>not</strong> track input tax, zero-rated/exempt/out-of-scope supplies, credit notes, or the green/plastic bag fee — add those by hand before filing, and always check the current official form at mira.gov.mv before submitting a real return.</div>
+        ${dateRangeBar('gstgh', from, to, `<button class="btn btn-sm" id="gstgh-csv">Export CSV</button>`)}
+        <table class="t">
+          <tbody>
+            <tr><td>Total gross tourism goods &amp; services supplied (folio invoices, ex-tax)</td><td class="num">${fmtMoney(gross)}</td></tr>
+            <tr class="report-subtotal"><td>Output TGST charged</td><td class="num">${fmtMoney(outputTax)}</td></tr>
+            <tr><td>Input TGST (not tracked — add manually)</td><td class="num">—</td></tr>
+            <tr class="report-total"><td>Net TGST payable</td><td class="num">${fmtMoney(outputTax)}</td></tr>
+          </tbody>
+        </table>
+      </div>
+    `;
+    wireDateRangeBar('gstgh', (f,t)=>{ gstGhState.from=f; gstGhState.to=t; paintGstGh(); });
+    qs('#gstgh-csv').addEventListener('click', ()=>{
+      downloadFile('gst-tgst-worksheet.csv', toCsv(['Line','Amount'], [
+        ['Total gross tourism goods & services supplied', gross],
+        ['Output TGST charged', outputTax],
+        ['Net TGST payable', outputTax],
+      ]), 'text/csv');
+    });
+  }
+
   function renderTax(){
     const periods = Store.all('taxPeriods').slice().sort((a,b)=>b.toDate.localeCompare(a.toDate));
     const totalPayable = Ledger.round2(periods.reduce((s,p)=>s + (p.status!=='PAID'?p.netPayable:0),0));
@@ -10324,6 +11338,100 @@ window.Posting = Posting;
 (function(){
 
   function render(params){
+    if(BusinessTypes.navKey()==='ROOM_BASED') return renderRoomBased(params);
+    return renderTripBased(params);
+  }
+
+  /* ---- Guesthouse dashboard — occupancy, arrivals/departures, outstanding
+     balance, a room-status grid, and a recent-activity feed. Mirrors the
+     "La Milano PMS" reference dashboard, but every number below is live
+     data from this app's own reservations/rooms/reservationInvoices/
+     posTickets, not the prototype's static figures. ---- */
+  function renderRoomBased(params){
+    setPageTitle('Dashboard', '');
+    renderNav();
+
+    const today = todayISO();
+    const rooms = Store.all('rooms').slice().sort((a,b)=>(a.number||'').localeCompare(b.number||'', undefined, {numeric:true}));
+    const activeRooms = rooms.filter(r=>r.status!=='OUT_OF_SERVICE');
+    const occupiedCount = rooms.filter(r=>r.status==='OCCUPIED').length;
+    const occPct = activeRooms.length ? Math.round(100*occupiedCount/activeRooms.length) : 0;
+
+    const reservations = Store.all('reservations');
+    const arrivals = reservations.filter(r=>r.checkIn===today && !['CANCELLED','NO_SHOW'].includes(r.status));
+    const arrivalsDirect = arrivals.filter(r=>{ const c=Store.find('customers', r.customerId); return !c || c.type!=='AGENT'; }).length;
+    const arrivalsAgent = arrivals.length - arrivalsDirect;
+
+    const departures = reservations.filter(r=>r.checkOut===today && r.status!=='CANCELLED');
+    const openFolios = departures.filter(r=>r.status==='CHECKED_OUT' && !r.reservationInvoiceId).length;
+
+    const openInvoices = Store.all('reservationInvoices').map(inv=>({ inv, balance: Posting.reservationInvoiceBalance(inv) })).filter(x=>x.balance>0.004);
+    const outstanding = Ledger.round2(openInvoices.reduce((s,x)=>s+x.balance,0));
+
+    const roomCellClass = (status)=> status==='OCCUPIED' ? 'rc-occupied' : status==='VACANT_DIRTY' ? 'rc-dirty' : status==='OUT_OF_SERVICE' ? 'rc-oos' : 'rc-clean';
+    const roomCellLabel = (status)=> status==='OCCUPIED' ? 'Occupied' : status==='VACANT_DIRTY' ? 'Dirty' : status==='OUT_OF_SERVICE' ? 'Out of service' : 'Clean';
+
+    // Recent activity: posted journal entries for folio invoices, receipts and
+    // POS tickets (their descriptions already read like an activity line),
+    // merged with check-in/check-out events (not separately journaled).
+    const events = [];
+    Store.all('journalEntries').forEach(je=>{
+      if(['reservationInvoice','receipt','posTicket'].includes(je.sourceType)){
+        events.push({ when: je.createdAt||je.date, text: je.description });
+      }
+    });
+    reservations.forEach(r=>{
+      if(r.status==='CHECKED_IN') events.push({ when: r.updatedAt||r.createdAt, text: `${esc(r.reservationNo)} checked in — Room ${esc((Store.find('rooms', r.roomId)||{}).number||'?')}` });
+      if(r.status==='CHECKED_OUT') events.push({ when: r.updatedAt||r.createdAt, text: `${esc(r.reservationNo)} checked out — Room ${esc((Store.find('rooms', r.roomId)||{}).number||'?')}` });
+    });
+    events.sort((a,b)=>(b.when||'').localeCompare(a.when||''));
+    const recent = events.slice(0,8);
+
+    qs('#content').innerHTML = `
+      <div class="grid grid-4 mb-16">
+        <div class="stat"><div class="label">Occupancy tonight</div><div class="value">${occupiedCount}/${activeRooms.length}</div><div class="sub">${occPct}% occupied</div></div>
+        <div class="stat"><div class="label">Arrivals today</div><div class="value">${arrivals.length}</div><div class="sub">${arrivalsDirect} direct · ${arrivalsAgent} via agent</div></div>
+        <div class="stat"><div class="label">Departures today</div><div class="value">${departures.length}</div><div class="sub">${openFolios ? openFolios+' folio(s) still open' : 'All folios settled'}</div></div>
+        <div class="stat"><div class="label">Outstanding balance</div><div class="value">${fmtMoney(outstanding)}</div><div class="sub">${openInvoices.length ? 'Across '+openInvoices.length+' unpaid invoice(s)' : 'Nothing outstanding'}</div></div>
+      </div>
+
+      <div class="grid grid-2">
+        <div class="card">
+          <div class="card-head"><h2>Room status</h2><a class="linkbtn" onclick="Router.navigate('rooms')">Rooms &amp; rates &rarr;</a></div>
+          ${rooms.length ? `<div class="roomgrid">${rooms.map(r=>`
+            <div class="roomcell ${roomCellClass(r.status)}" title="${esc(roomCellLabel(r.status))}">
+              <span class="num">${esc(r.number)}</span>${esc(roomCellLabel(r.status))}
+            </div>`).join('')}</div>` : `<p class="muted small">No rooms set up yet.</p>`}
+        </div>
+        <div class="card">
+          <div class="card-head"><h2>Recent activity</h2></div>
+          ${recent.length ? `<div class="feed">${recent.map(e=>`
+            <div class="item"><span class="dot"></span><div><div>${e.text}</div><div class="when">${fmtDateTime(e.when)}</div></div></div>`).join('')}</div>`
+            : `<p class="muted small">Nothing has happened yet.</p>`}
+        </div>
+      </div>
+
+      <div class="grid grid-2">
+        <div class="card">
+          <div class="card-head"><h2>Today's arrivals</h2><a class="linkbtn" onclick="Router.navigate('reservations')">All reservations &rarr;</a></div>
+          ${arrivals.length ? arrivals.map(r=>{
+            const cust = Store.find('customers', r.customerId); const room = Store.find('rooms', r.roomId);
+            const badge = r.status==='CHECKED_IN' ? '<span class="badge badge-teal">Checked in</span>' : r.status==='CHECKED_OUT' ? '<span class="badge badge-gray">Checked out</span>' : '<span class="badge badge-green">Confirmed</span>';
+            return `<div class="flex-between mb-8" style="cursor:pointer" onclick="Router.navigate('reservations/${r.id}')"><span>${esc(r.reservationNo)} — Room ${esc(room?room.number:'?')} · ${esc(cust?cust.name:'')}</span>${badge}</div>`;
+          }).join('') : `<p class="muted small">No arrivals today.</p>`}
+        </div>
+        <div class="card">
+          <div class="card-head"><h2>Outstanding invoices</h2><a class="linkbtn" onclick="Router.navigate('resoutstanding')">All outstanding &rarr;</a></div>
+          ${openInvoices.length ? openInvoices.slice(0,6).map(({inv,balance})=>{
+            const cust = Store.find('customers', inv.customerId);
+            return `<div class="flex-between mb-8" style="cursor:pointer" onclick="Router.navigate('resinvoices/${inv.id}')"><span>${esc(inv.invoiceNo)} — ${esc(cust?cust.name:'')}</span><span class="mono">${fmtMoney(balance)}</span></div>`;
+          }).join('') : `<p class="muted small">No outstanding invoices.</p>`}
+        </div>
+      </div>
+    `;
+  }
+
+  function renderTripBased(params){
     setPageTitle('Dashboard', '');
     renderNav();
     Availability.sweepExpiredHolds();
@@ -10549,6 +11657,12 @@ const NAV = [
     {path:'/ledgers', label:'Ledgers', ed:'back'},
     {path:'/tax', label:'Tax', ed:'back'},
   ]},
+  { group:'Operations', icon:'catalog', items:[
+    {path:'/housekeeping', label:'Housekeeping', ed:'front', biz:'ROOM_BASED'},
+    {path:'/inventory', label:'Inventory', ed:'front', biz:'ROOM_BASED'},
+    {path:'/pricing', label:'Dynamic pricing', ed:'front', biz:'ROOM_BASED'},
+    {path:'/channels', label:'Channel manager', ed:'front', biz:'ROOM_BASED'},
+  ]},
   { group:'', items:[
     {path:'/reports', label:'Reports', icon:'reports', ed:'all'},
     {path:'/settings', label:'Settings', icon:'settings', ed:'all'},
@@ -10563,10 +11677,15 @@ const REPORT_TAB_EDITION = {
   pnl:'back', bs:'back', tb:'back', cashflow:'back', gl:'back',
   araging:'back', apaging:'back', vendors:'back', tax:'back',
   customers:'front', trips:'front', equipment:'front',
+  occupancy:'front', guestinfo:'front', revsummary:'front', agentperf:'front', gstgh:'front',
 };
 // Trip/equipment operational reports only make sense for the trip-based
-// verticals (there's no trips/equipment data for a Guesthouse to report on).
-const REPORT_TAB_BIZ = { trips:'TRIP_BASED', equipment:'TRIP_BASED' };
+// verticals (there's no trips/equipment data for a Guesthouse to report on),
+// and the reverse for the Guesthouse-only hospitality reports.
+const REPORT_TAB_BIZ = {
+  trips:'TRIP_BASED', equipment:'TRIP_BASED',
+  occupancy:'ROOM_BASED', guestinfo:'ROOM_BASED', revsummary:'ROOM_BASED', agentperf:'ROOM_BASED', gstgh:'ROOM_BASED',
+};
 
 const EditionGuard = {
   edition(){ return EDITION; },
@@ -10867,6 +11986,11 @@ function boot(){
   // downloadable editions never set it, so they keep booting exactly as
   // before, synchronously, with no network round trip and no server at all.
   if(window.CLOUD_MODE){
+    // Note: CloudSync.bootstrap() requires a logged-in tenant session, so
+    // /book and /widget aren't publicly reachable in cloud mode yet — that
+    // needs its own unauthenticated server route exposing a tenant's
+    // availability, which isn't built. Public booking today only works in
+    // the standalone single-file app (see isPublicRoute() below).
     CloudSync.bootstrap().then(payload=>{
       if(!payload) return; // bootstrap() already redirected to /login
       Store.initFromData(payload.data);
@@ -10885,7 +12009,24 @@ function boot(){
   continueBoot();
 }
 
+// Guest-facing routes (public.js) — no login, no setup wizard, no sidebar.
+// They render straight into document.body themselves (same pattern as the
+// waiver kiosk), reading whatever business data is already in this
+// browser's Store. In the standalone single-file app that means they only
+// show real availability on the same device/browser the business set up
+// on (useful for a front-desk kiosk or a demo); once the cloud server
+// (server/) is deployed, that's the one place this can serve independent
+// guests on their own devices, same storage either way.
+function isPublicRoute(){
+  const base = '/'+((location.hash||'').replace(/^#\/?/,'').split('/')[0]||'');
+  return base==='/book' || base==='/widget';
+}
+
 function continueBoot(){
+  // public.js itself shows a friendly "not open yet" message when setup
+  // isn't done or this isn't the Guesthouse vertical — never the owner
+  // setup wizard or the staff shell, which a guest should never see.
+  if(isPublicRoute()){ Router.render(); return; }
   if(needsSetup()){ renderSetupWizard(); return; }
   if(!Auth.currentUser()){ Auth.setCurrentUser(Store.all('users')[0].id); }
   Store.subscribe(()=>{ /* modules re-render themselves on explicit actions */ });
